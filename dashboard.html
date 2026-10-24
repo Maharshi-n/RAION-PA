@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raion</title>
+<style>
+  :root { --bg:#0b0d12; --panel:#141821; --line:#232938; --text:#e8ecf3; --dim:#8a93a6; --accent:#25d366; --ai:#7c9cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: system-ui, "Segoe UI", sans-serif; height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:16px; padding:14px 20px; border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0; font-weight:650; letter-spacing:.2px; }
+  h1 span { color:var(--accent); }
+  .pill { padding:6px 12px; border-radius:999px; background:var(--panel); border:1px solid var(--line); font-size:13px; color:var(--dim); display:flex; align-items:center; gap:8px; }
+  .pill.live { color:var(--text); border-color:var(--accent); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); }
+  .live .dot { background:var(--accent); animation: ping 1.2s infinite; }
+  @keyframes ping { 0%{box-shadow:0 0 0 0 #25d36699} 100%{box-shadow:0 0 0 10px #25d36600} }
+  .cost { margin-left:auto; font-variant-numeric: tabular-nums; }
+  button { background:var(--accent); color:#04130a; border:0; border-radius:8px; padding:8px 14px; font-weight:650; cursor:pointer; font-size:13px; }
+  button.stop { background:#ff5c5c; color:#fff; }
+  main { flex:1; display:grid; grid-template-columns: minmax(0,1fr) 380px; gap:16px; padding:16px; min-height:0; }
+  .stage { background:var(--panel); border:1px solid var(--line); border-radius:14px; display:flex; align-items:center; justify-content:center; min-height:0; position:relative; overflow:hidden; }
+  .side { display:flex; flex-direction:column; gap:16px; min-height:0; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px 14px; display:flex; flex-direction:column; min-height:0; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--dim); margin:0 0 10px; font-weight:600; }
+  #transcript { flex:1.4; } #actions { flex:1; }
+  .scroll { overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:8px; }
+  .msg { padding:8px 11px; border-radius:10px; font-size:14px; line-height:1.4; max-width:92%; animation: in .25s ease-out; }
+  .msg.user { background:#1f2a22; align-self:flex-end; border:1px solid #25d36644; }
+  .msg.ai { background:#1b2135; align-self:flex-start; border:1px solid #7c9cff44; }
+  .act { font-family: ui-monospace, Consolas, monospace; font-size:12.5px; padding:7px 10px; border-radius:8px; background:#10131a; border-left:3px solid var(--ai); animation: in .25s ease-out; }
+  .act b { color:var(--ai); font-weight:600; }
+  @keyframes in { from { opacity:0; transform: translateY(6px); } }
+  .page { height: calc(100% - 28px); max-width: calc(100% - 28px); aspect-ratio: 210 / 297; background:#fff; color:#1a1a1a;
+          border-radius:4px; box-shadow: 0 10px 40px #0008; padding: 4% 6%; display:flex; flex-direction:column; overflow:hidden;
+          font-family: "Nirmala UI", "Noto Sans Devanagari", "Mangal", serif; font-size: 15px; line-height:1.65; animation: in .4s ease-out; }
+  .lh { text-align:center; border-bottom: 3px double #8a1c1c; padding-bottom:10px; margin-bottom:14px; }
+  .lh .org { font-size: 1.7em; font-weight:700; color:#8a1c1c; letter-spacing:.3px; }
+  .lh .org-en { font-size: .95em; font-weight:600; color:#333; letter-spacing:2px; text-transform:uppercase; }
+  .lh .contact { font-size:.8em; color:#555; }
+  .meta { display:flex; justify-content:space-between; margin-bottom:12px; }
+  .f { white-space: pre-wrap; min-height:1.65em; }
+  .f:empty::after { content: attr(data-ph); color:#bbb; }
+  .subj { margin: 12px 0; font-weight:600; }
+  .body { flex:1; text-align: justify; }
+  .sign { align-self:flex-end; text-align:right; margin-top: 18px; min-width: 40%; }
+  .caret::after { content:"▌"; color:#25d366; animation: blink .8s steps(1) infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+  mark.chg { background:#ffe58a; color:inherit; border-radius:3px; transition: background 1.6s; }
+  mark.chg.fade { background:transparent; }
+  @media print {
+    body * { visibility:hidden; }
+    .page, .page * { visibility:visible; }
+    .page { position:fixed; inset:0; height:auto; max-width:none; box-shadow:none; border-radius:0; padding: 14mm 16mm; }
+  }
+  /* tabs + WhatsApp + printers views */
+  .tabs { display:flex; gap:4px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:3px; }
+  .tabs button { background:transparent; color:var(--dim); font-weight:600; padding:6px 12px; }
+  .tabs button.on { background:#1f2533; color:var(--text); }
+  button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); }
+  body:not([data-view="call"]) #view-call, body:not([data-view="call"]) #mic { display:none; }
+  .view { display:none; flex:1; gap:16px; padding:16px; min-height:0; }
+  body[data-view="wa"] #view-wa { display:grid; grid-template-columns: minmax(0,1fr) 380px; }
+  body[data-view="printers"] #view-printers { display:block; overflow:auto; }
+  .empty { color:var(--dim); font-size:13px; }
+  .wa { max-width:78%; padding:8px 11px; border-radius:10px; font-size:14px; line-height:1.45; animation: in .25s ease-out; white-space:pre-wrap; }
+  .wa.in { align-self:flex-start; background:#1b2135; border:1px solid #7c9cff44; }
+  .wa.out { align-self:flex-end; background:#1f2a22; border:1px solid #25d36644; }
+  .wa .who { font-size:11px; color:var(--dim); margin-bottom:3px; }
+  .wa img { display:block; max-width:260px; max-height:260px; border-radius:6px; margin-top:6px; background:#fff; }
+  .wa a { color:#9db4ff; }
+  .person { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .person .st { color:var(--dim); } .person .st.busy { color:var(--accent); }
+  .printers { max-width:900px; }
+  .printers table { width:100%; border-collapse:collapse; margin:10px 0 14px; font-size:14px; }
+  .printers th, .printers td { text-align:left; padding:9px 8px; border-bottom:1px solid var(--line); }
+  .printers th { color:var(--dim); font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+  .printers input[type=text] { background:#10131a; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; width:160px; }
+  .note { color:var(--dim); font-size:13px; margin:0 0 6px; line-height:1.5; }
+  .ok { color:var(--accent); } .bad { color:#ff7b7b; }
+  @media (max-width: 860px) { body[data-view="wa"] #view-wa { grid-template-columns: 1fr; } }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } .stage { min-height:60vh; } .side .card { min-height:220px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>MNA <span>Raion</span></h1>
+  <nav class="tabs">
+    <button data-v="call" class="on">📞 Call</button>
+    <button data-v="wa">💬 WhatsApp</button>
+    <button data-v="printers">🖨 Printers</button>
+  </nav>
+  <div class="pill" id="status"><span class="dot"></span><span id="statusText">Waiting for a WhatsApp call…</span></div>
+  <div class="pill cost">₹ <span id="cost">0.00</span></div>
+  <button id="mic">🎙 Test with browser mic</button>
+</header>
+<section class="view" id="view-wa">
+  <div class="card chat"><h2>WhatsApp messages</h2><div class="scroll" id="walist"><div class="empty">No messages yet. Allowed numbers can message +91 96440 05577.</div></div></div>
+  <div class="side">
+    <div class="card"><h2>People</h2><div id="people" class="scroll"><div class="empty">—</div></div></div>
+    <div class="card" style="flex:1.6"><h2>Agent work · memory · prints</h2><div class="scroll" id="walog"></div></div>
+  </div>
+</section>
+<section class="view" id="view-printers">
+  <div class="card printers">
+    <h2>Printers on this PC</h2>
+    <p class="note">These are the printers installed in Windows (USB or network). Give each a friendly name like “Office” or
+      “Accounts” so people can say “Accounts wale printer pe print karo”. The default is used when no printer is named.</p>
+    <table><thead><tr><th>Default</th><th>Printer (Windows name)</th><th>Friendly name</th><th>Status</th><th></th></tr></thead>
+      <tbody id="ptable"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody></table>
+    <button id="prefresh" class="ghost">↻ Refresh</button>
+  </div>
+</section>
+<main id="view-call">
+  <div class="stage">
+    <div class="page" id="page">
+      <!-- ponytail: placeholder letterhead; swap this block for the real MNA letterhead design -->
+      <div class="lh">
+        <div class="org">माँ नर्मदा ग्रुप ऑफ इंस्टिट्यूट्स</div>
+        <div class="org-en">Maa Narmada Group of Institutes</div>
+        <div class="contact">📞 +91 96440 05577</div>
+      </div>
+      <div class="meta">
+        <div>पत्रांक: <span class="f" data-k="ref"></span></div>
+        <div>दिनांक: <span class="f" data-k="date"></span></div>
+      </div>
+      <div class="f" data-k="to" data-ph="प्रति,"></div>
+      <div class="subj">विषय: <span class="f" data-k="subject"></span></div>
+      <div class="f body" data-k="body" data-ph="बोलिए, मैं यहाँ लिखूँगा…"></div>
+      <div class="f sign" data-k="sign"></div>
+    </div>
+  </div>
+  <div class="side">
+    <div class="card" id="transcript"><h2>Live transcript</h2><div class="scroll" id="tlist"></div></div>
+    <div class="card" id="actions"><h2>Agent actions</h2><div class="scroll" id="alist"></div></div>
+  </div>
+</main>
+<audio id="remote" autoplay></audio>
+<script>
+// ---- transcript / actions ----
+const tlist = document.getElementById("tlist"), alist = document.getElementById("alist");
+const bubbles = {};
+function bubble(role, key) {
+  if (key && bubbles[key]) return bubbles[key];
+  const d = document.createElement("div"); d.className = "msg " + role; tlist.appendChild(d);
+  if (key) bubbles[key] = d;
+  return d;
+}
+const scroll = el => el.scrollTop = el.scrollHeight;
+function action(name, args) {
+  const d = document.createElement("div"); d.className = "act";
+  const a = Object.entries(args).map(([k, v]) => `${k}=${v}`).join(", ");
+  d.innerHTML = `<b>${name}</b>(${a.replace(/</g, "&lt;")})`;
+  alist.appendChild(d); scroll(alist);
+}
+
+// ---- letter environment ----
+const shown = {};   // field -> text currently on the page
+const typing = {};  // field -> token, so a newer update cancels an older animation
+const esc = s => s.replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
+
+async function typeField(el, k, text) {
+  const old = shown[k] || "", token = typing[k] = {};
+  shown[k] = text;
+  if (text.startsWith(old)) {  // dictation: type the new part like a typist
+    const add = text.slice(old.length), step = Math.max(6, Math.min(35, 1400 / (add.length || 1)));
+    el.classList.add("caret");
+    for (let i = 1; i <= add.length; i++) {
+      if (typing[k] !== token) return;
+      el.textContent = old + add.slice(0, i);
+      await new Promise(r => setTimeout(r, step));
+    }
+    el.classList.remove("caret");
+    return;
+  }
+  // correction: show the new text and highlight only the part that changed
+  let p = 0; while (p < old.length && p < text.length && old[p] === text[p]) p++;
+  let s = 0; while (s < old.length - p && s < text.length - p && old[old.length - 1 - s] === text[text.length - 1 - s]) s++;
+  el.classList.remove("caret");
+  el.innerHTML = esc(text.slice(0, p)) + `<mark class="chg">${esc(text.slice(p, text.length - s))}</mark>` + esc(text.slice(text.length - s));
+  setTimeout(() => el.querySelector("mark")?.classList.add("fade"), 1200);
+}
+
+function renderLetter(doc, print) {
+  const jobs = [...document.querySelectorAll(".page [data-k]")]
+    .filter(el => (doc[el.dataset.k] || "") !== (shown[el.dataset.k] || ""))
+    .map(el => typeField(el, el.dataset.k, doc[el.dataset.k] || ""));
+  if (print) Promise.all(jobs).then(() => setTimeout(() => window.print(), 300));
+}
+
+// ---- tabs ----
+function setView(v) {
+  document.body.dataset.view = v;
+  document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.v === v));
+  try { localStorage.setItem("view", v); } catch {}
+  if (v === "printers") loadPrinters();
+}
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => setView(b.dataset.v));
+let savedView = "call"; try { savedView = localStorage.getItem("view") || "call"; } catch {}
+setView(savedView);
+
+// ---- WhatsApp view ----
+const walist = document.getElementById("walist"), walogEl = document.getElementById("walog");
+const people = {};
+const short = n => n ? "…" + String(n).slice(-4) : "";
+function waMsg(m) {
+  walist.querySelector(".empty")?.remove();
+  const d = document.createElement("div");
+  d.className = "wa " + m.dir;
+  const who = m.dir === "in" ? `${m.name || "+" + m.num}` : `Raion → ${people[m.num]?.name || short(m.num)}`;
+  if (m.dir === "in" && m.name) personState(m.num, null, m.name);
+  const icon = {voice: "🎤 ", image: "🖼 ", document: "📄 ", video: "🎞 ", audio: "🔊 "}[m.kind] || "";
+  let html = `<div class="who">${esc(who)}${m.tray ? ` · tray: ${m.tray}` : ""}</div>${icon}${esc(m.text || "")}`;
+  if (m.url && /\.(png|jpe?g|webp)$/i.test(m.url)) html += `<a href="${m.url}" target="_blank"><img src="${m.url}" loading="lazy"></a>`;
+  else if (m.url) html += `<div><a href="${m.url}" target="_blank">open file</a></div>`;
+  d.innerHTML = html;
+  walist.appendChild(d); scroll(walist);
+}
+function walog(html, num) {
+  const d = document.createElement("div"); d.className = "act";
+  d.innerHTML = (num ? `<span class="who" style="color:var(--dim)">${short(num)} · </span>` : "") + html;
+  walogEl.appendChild(d); scroll(walogEl);
+}
+function personState(num, status, name) {
+  const p = people[num] = people[num] || {name: "+" + num, status: "idle"};
+  if (name) p.name = name;
+  if (status === "thinking") p.status = "working…";
+  else if (status === "idle" || status === "started") p.status = "chat open";
+  else if (status === "closed") p.status = "chat closed (memory saved)";
+  document.getElementById("people").innerHTML = Object.entries(people).map(([n, p]) =>
+    `<div class="person"><span>${esc(p.name)} <span class="st">+${n}</span></span><span class="st ${p.status === "working…" ? "busy" : ""}">${esc(p.status)}</span></div>`).join("");
+}
+
+// ---- printers view ----
+const ptable = document.getElementById("ptable");
+async function loadPrinters(list) {
+  try { list = list || await (await fetch("/api/printers")).json(); }
+  catch { ptable.innerHTML = `<tr><td colspan="5" class="bad">Couldn't read printers</td></tr>`; return; }
+  if (list.error || !list.length) { ptable.innerHTML = `<tr><td colspan="5" class="empty">${esc(list.error || "No printers installed on this PC yet. Add them in Windows Settings → Printers.")}</td></tr>`; return; }
+  ptable.innerHTML = list.map((p, i) => `<tr>
+    <td><input type="radio" name="def" ${p.default ? "checked" : ""} data-i="${i}"></td>
+    <td>${esc(p.name)}</td>
+    <td><input type="text" value="${esc(p.alias || "")}" placeholder="e.g. Office" data-i="${i}"></td>
+    <td class="${p.status === "Ready" ? "ok" : "bad"}">${esc(p.status)}</td>
+    <td><button class="ghost" data-test="${i}">Test print</button></td></tr>`).join("");
+  const post = body => fetch("/api/printers", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}).then(r => r.json());
+  ptable.querySelectorAll("input[type=radio]").forEach(r => r.onchange = async () => loadPrinters(await post({name: list[r.dataset.i].name, default: true})));
+  ptable.querySelectorAll("input[type=text]").forEach(t => t.onchange = async () => loadPrinters(await post({name: list[t.dataset.i].name, alias: t.value})));
+  ptable.querySelectorAll("[data-test]").forEach(b => b.onclick = async () => {
+    b.textContent = "Printing…";
+    const r = await fetch("/api/printers/test", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: list[b.dataset.test].name})}).then(r => r.json());
+    b.textContent = r.ok ? "✓ Sent" : "✗ " + (r.error || "failed");
+  });
+}
+document.getElementById("prefresh").onclick = () => loadPrinters();
+
+// ---- call status ----
+let timer, t0;
+function setStatus(live, text) {
+  document.getElementById("status").classList.toggle("live", live);
+  document.getElementById("statusText").textContent = text;
+}
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    else if (m.type === "letter") renderLetter(m.doc, m.print);
+    else if (m.type === "tool" && m.num) walog(`<b>${esc(m.name)}</b> ${esc(JSON.stringify(m.args))}`, m.num);
+    else if (m.type === "tool") action(m.name, m.args);
+    else if (m.type === "wa") waMsg(m);
+    else if (m.type === "wa_status" || m.type === "wa_session") personState(m.num, m.status);
+    else if (m.type === "memory") walog(m.changed.length ? `🧠 saved: ${esc(m.changed.join(", "))}` : "🧠 nothing new to remember", m.num);
+    else if (m.type === "print") walog(`🖨 printed ${m.copies}× ${esc(m.file)} on ${esc(m.printer)}`, m.num);
+    else if (m.type === "error" && /^(Agent|make_|send_|print|fill_|download)/.test(m.message)) walog(`<span class="bad">⚠ ${esc(m.message)}</span>`);
+    else if (m.type === "transcript") {
+      const b = bubble(m.role, m.role === "ai" ? m.item : null);
+      b.textContent = m.text ?? (b.textContent + m.delta); scroll(tlist);
+    }
+    else if (m.type === "cost") document.getElementById("cost").textContent = m.inr.toFixed(2);
+    else if (m.type === "call" && m.status === "started") {
+      t0 = Date.now(); clearInterval(timer);
+      timer = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); setStatus(true, `Live · ${m.from} · ${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`); }, 500);
+      setStatus(true, `Live · ${m.from}`);
+    }
+    else if (m.type === "call" && m.status === "ended") { clearInterval(timer); setStatus(false, `Call ended · ₹${m.cost.toFixed(2)} · waiting for next call…`); }
+    else if (m.type === "error") action("error", {message: m.message});
+  };
+  ws.onclose = () => setTimeout(connect, 1000);
+}
+connect();
+
+// ---- browser mic test (same agent pipeline as WhatsApp) ----
+let pc;
+document.getElementById("mic").onclick = async e => {
+  const btn = e.currentTarget;
+  if (pc) { pc.close(); pc = null; btn.textContent = "🎙 Test with browser mic"; btn.classList.remove("stop"); return; }
+  const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  pc = new RTCPeerConnection();
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+  pc.ontrack = ev => document.getElementById("remote").srcObject = ev.streams[0] || new MediaStream([ev.track]);
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise(r => { if (pc.iceGatheringState === "complete") r(); else pc.onicegatheringstatechange = () => pc.iceGatheringState === "complete" && r(); });
+  const res = await fetch("/offer", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({sdp: pc.localDescription.sdp})});
+  await pc.setRemoteDescription(await res.json());
+  btn.textContent = "■ Stop"; btn.classList.add("stop");
+};
+</script>
+</body>
+</html>

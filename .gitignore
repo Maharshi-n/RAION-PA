@@ -1,0 +1,8 @@
+# Only the code goes to GitHub. memory\, .env, .venv, site\, logs and everything else stay on the PC.
+/*
+!/.gitignore
+!/*.py
+!/*.html
+!/*.ps1
+!/*.md
+!/requirements.txt
