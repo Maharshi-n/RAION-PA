@@ -981,9 +981,12 @@ async def pump(s: Session, brain: Brain):
             await send_text(s.num, "Sorry, kuch gadbad ho gayi. Ek baar phir bhejiye.")
 
 
-def busy_mark():  # watchdog.ps1 updates the code only while no chat is mid-reply
+CALLS = 0  # live phone calls (app.py counts them)
+
+
+def busy_mark():  # watchdog.ps1 updates the code only while no chat is mid-reply and no call is on
     RUNTIME.mkdir(exist_ok=True)
-    (RUNTIME / "busy").write_text(str(sum(x.busy for x in SESSIONS.values())))
+    (RUNTIME / "busy").write_text(str(sum(x.busy for x in SESSIONS.values()) + CALLS))
 
 
 async def end_turn(s: Session, ev: dict):

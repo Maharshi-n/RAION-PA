@@ -1,6 +1,7 @@
 # One-time setup of Raion on this PC. Safe to run again: it skips what is already done.
 # Run in the Raion folder:  powershell -ExecutionPolicy Bypass -File setup.ps1
-# Add -Start only on switch day, after Maharshi's laptop has stopped its Raion and ngrok.
+# Add -Start only on switch day, after Maharshi's laptop has stopped its Raion and ngrok: it starts Raion and adds
+# the auto-start task. Without -Start nothing runs by itself.
 param([switch]$Start)
 $Root = $PSScriptRoot
 Set-Location $Root
@@ -16,7 +17,14 @@ function Need($name, $id, [scriptblock]$have) {
 
 # 1. programs
 Need "Git" "Git.Git" { Get-Command git -ErrorAction SilentlyContinue }
-Need "Python 3.12" "Python.Python.3.12" { (Get-Command py -ErrorAction SilentlyContinue) -and ((py -3.12 --version 2>&1) -match "3\.12") }
+function Python312 {  # path of Python 3.12 (py launcher, else the usual install folders), or nothing
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        $p = "$(py -3.12 -c "import sys; print(sys.executable)" 2>$null)".Trim()
+        if ($p -and (Test-Path $p)) { return $p }
+    }
+    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe", "C:\Program Files\Python312\python.exe" | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+Need "Python 3.12" "Python.Python.3.12" { Python312 }
 Need "FFmpeg" "Gyan.FFmpeg" { Get-Command ffmpeg -ErrorAction SilentlyContinue }
 Need "LibreOffice" "TheDocumentFoundation.LibreOffice" { Test-Path "C:\Program Files\LibreOffice\program\soffice.com" }
 Need "Node.js" "OpenJS.NodeJS.LTS" { Get-Command node -ErrorAction SilentlyContinue }
@@ -25,7 +33,7 @@ if ((claude auth status 2>&1 | Out-String) -notmatch '"loggedIn":\s*true') { Say
 
 # 2. Python packages
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
-if (-not (Test-Path $Py)) { Say "making .venv"; py -3.12 -m venv .venv }
+if (-not (Test-Path $Py)) { Say "making .venv"; & (Python312) -m venv .venv }
 & $Py -m pip install -q --upgrade pip
 & $Py -m pip install -q -r requirements.txt
 if ($LASTEXITCODE) { Say "pip install failed: see the errors above"; exit 1 }
@@ -63,7 +71,10 @@ else {
     Say ("check_tools: " + $(if ($ok) { "ok" } else { "FAILED (run: .venv\Scripts\python.exe check_tools.py)" }))
 }
 
-# 6. start by itself at every login, restarted if it ever stops
+# 6. switch day only (-Start): start now, and by itself at every login, restarted if it ever stops.
+#    Not before: a second Raion running beside the laptop's would send every reminder twice.
+if (-not $Start) { Say "setup done. On switch day, after the laptop's Raion is stopped: setup.ps1 -Start"; exit 0 }
+if (-not $ready) { Say "not starting: memory\ or .env is missing"; exit 1 }
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -WorkingDirectory $Root `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Root\watchdog.ps1`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
@@ -71,10 +82,6 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) 
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 try {
     Register-ScheduledTask -TaskName "Raion" -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null
-    Say "auto-start task 'Raion' ok"
-} catch { Say "could not add the auto-start task: run PowerShell as Administrator and run setup.ps1 again ($($_.Exception.Message))" }
-
-if ($Start -and $ready) {
-    Start-ScheduledTask -TaskName "Raion"
-    Say "Raion started. Log: $Root\logs\watchdog.log"
-}
+} catch { Say "could not add the auto-start task: run PowerShell as Administrator and run setup.ps1 -Start again ($($_.Exception.Message))"; exit 1 }
+Start-ScheduledTask -TaskName "Raion"
+Say "Raion started, and starts by itself at every login. Log: $Root\logs\watchdog.log"

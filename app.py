@@ -132,8 +132,18 @@ def strip_wav(b: bytes) -> bytes:
 
 
 # ---------------- one call session ----------------
-async def run_session(pc: RTCPeerConnection, in_track, out: OutTrack, label: str, num=None, reminder=None,
-                      picked_up: asyncio.Event | None = None, call_id=None):
+async def run_session(*args, **kw):  # counts live calls, so watchdog.ps1 never restarts Raion mid-call
+    wa_agent.CALLS += 1
+    wa_agent.busy_mark()
+    try:
+        await call_session(*args, **kw)
+    finally:
+        wa_agent.CALLS -= 1
+        wa_agent.busy_mark()
+
+
+async def call_session(pc: RTCPeerConnection, in_track, out: OutTrack, label: str, num=None, reminder=None,
+                       picked_up: asyncio.Event | None = None, call_id=None):
     """One call. num: the WhatsApp number (None = browser test). reminder + picked_up: a call we placed, which starts
     talking when they pick up."""
     if not SARVAM_KEY:
@@ -529,4 +539,4 @@ app.add_routes([web.get("/", index), web.get("/ws", ws_handler), web.post("/offe
 
 if __name__ == "__main__":
     print(f"Dashboard: http://localhost:{PORT}")
-    web.run_app(app, port=PORT, print=None)
+    web.run_app(app, host="127.0.0.1", port=PORT, print=None)  # only this PC (ngrok brings WhatsApp in)
