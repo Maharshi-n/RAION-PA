@@ -1923,17 +1923,40 @@ async def keeper(s: Session, final=False):
 
 
 # ---------------- background: idle sessions + daily backup ----------------
-def backup_memory():
+# Its own low-priority process: zipping a GB in a thread here starved the server until it stopped answering.
+# Written as .part and renamed at the end, so a backup cut off by a restart is redone instead of kept broken.
+BACKUP_SCRIPT = """
+import os, sys, zipfile
+from pathlib import Path
+if os.name == "nt":
+    import ctypes; ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x4000)
+mem, out = Path(sys.argv[1]), Path(sys.argv[2])
+part = out.with_suffix(".part")
+with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
+    for f in mem.rglob("*"):
+        if f.is_file() and "library" not in f.relative_to(mem).parts[:3]:  # library = static copy of source/
+            z.write(f, f.relative_to(mem))
+part.replace(out)
+"""
+
+
+async def backup_memory():
     BACKUPS.mkdir(exist_ok=True)
     out = BACKUPS / f"memory_{date.today():%Y%m%d}.zip"
-    if out.exists():
+    if out.exists() or BACKUP_LOCK.locked():
         return
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in MEM.rglob("*"):
-            if f.is_file() and "library" not in f.relative_to(MEM).parts[:3]:  # library = static copy of source/
-                z.write(f, f.relative_to(MEM))
+    async with BACKUP_LOCK:
+        proc = await asyncio.create_subprocess_exec(sys.executable, "-c", BACKUP_SCRIPT, str(MEM), str(out),
+                                                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, err = await proc.communicate()
+        if proc.returncode:
+            print("backup failed:", err.decode("utf-8", "replace")[-500:])
+            return
     for old in sorted(BACKUPS.glob("memory_*.zip"))[:-14]:  # keep two weeks
         old.unlink()
+
+
+BACKUP_LOCK = asyncio.Lock()
 
 
 def init_memory():
@@ -1951,7 +1974,7 @@ async def background():
     init_memory()
     while True:
         try:
-            await asyncio.to_thread(backup_memory)
+            asyncio.create_task(backup_memory())  # runs in the background; the loop doesn't wait for it
             await check_jobs()
             asyncio.create_task(make_cards())
             for s in list(SESSIONS.values()):
