@@ -34,6 +34,17 @@ async def main():
         r = await rpc(5, "tools/call", {"name": "send_message", "arguments": {"text": "नमस्ते"}})
         assert not r.get("isError") and wa.SENT[-1]["text"] == "नमस्ते"  # Hindi survives the pipe
 
+        # an automation run's key: only the build tools, and what it builds is kept to go with its message
+        built = []
+        wa.JOB_KEYS["jk"] = (s, built)
+        (s.p / "work" / "u.html").write_text("<html><body><h1>Report</h1></body></html>", encoding="utf-8")
+        async with wa.aiohttp.ClientSession(await wa.tool_api(), headers={"X-Raion-Key": "jk"}) as c:
+            assert {t["name"] for t in await (await c.get("/tools")).json()} == set(wa.BUILD_TOOLS)
+            r = await (await c.post("/call", json={"name": "send_message", "arguments": {"text": "x"}})).json()
+            assert r.get("isError") and "only build" in r["content"][0]["text"]
+            await (await c.post("/call", json={"name": "make_pdf", "arguments": {"html": "work/u.html", "name": "u"}})).json()
+        assert built == [s.p / "outbox" / "u.pdf"], built
+
         # automations: schedule, due times, site diff, delivery outside the 24-hour window
         try:
             await wa.schedule(s, {"action": "add", "task": "x", "time": "25:00"})
@@ -50,10 +61,14 @@ async def main():
         text, _ = await wa.watch(NUM, "j1", ["http://x"])
         assert "New notice" in text and "old" not in text, text
         await wa.notify(NUM, "update 1")  # no message from them yet: it waits and the doorbell rings
-        assert wa.SENT[-1]["type"] == "template" and wa._jread(NUM, "window.json", {})["waiting"] == ["update 1"]
-        assert await wa.window_opened(s) == ["update 1"] and wa.SENT[-1]["text"] == "update 1"
+        assert wa.SENT[-1]["type"] == "template" and wa._jread(NUM, "window.json", {})["waiting"][0]["text"] == "update 1"
+        assert [u["text"] for u in await wa.window_opened(s)] == ["update 1"] and wa.SENT[-1]["text"] == "update 1"
         await wa.notify(NUM, "update 2")  # window open: straight away
         assert wa.SENT[-1]["text"] == "update 2" and [n.split("\n")[-1] for n in s.notes] == ["update 1", "update 2"]
+        wa._jwrite(NUM, "window.json", {"last_in": 0})  # an update with a file waits too, then goes with its caption
+        await wa.notify(NUM, "report", built)
+        await wa.window_opened(s)
+        assert wa.SENT[-1]["type"] == "document" and wa.SENT[-1]["caption"] == "report", wa.SENT[-1]
 
         # reminder calls: no answer -> message; a call they pick up opens the window and sends what waited
         c = (await wa.schedule(s, {"action": "add", "task": "DHO ko letter", "time": "10:00", "date": "2099-01-01",
