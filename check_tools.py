@@ -153,7 +153,8 @@ async def main():
         # errands: an admin's job done through other people; their messages reach only that errand while it's open,
         # and its worker can only message them, look at their files and ask the admin
         quiet, turn, final, handle = wa._quiet, wa.errand_turn, wa.errand_final, wa.handle_message
-        wa.ERRANDS, wa.GATHER, wa._quiet = Path(tempfile.mkdtemp()), 0, lambda t=None: False
+        wa.ERRANDS, wa.CONTACTS, wa.GATHER, wa._quiet = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp()), 0, \
+            lambda t=None: False
         runs, finals, passed = [], [], []
 
         async def fake_turn(eid, num):  # a worker run without the model: it just takes everything new
@@ -215,6 +216,14 @@ async def main():
             assert "can't use" in said(await call("send_message", text="x"))
             assert not (await call("reply", text="Kitni buses hain?")).get("isError")
             assert wa.SENT[-1] == {"to": E1, "type": "text", "text": "Kitni buses hain?"}
+            # they write more while it works: that reply isn't sent, it's shown the new message instead (once)
+            ctx["upto"] = len(wa._elines(eid, E1))
+            await wa.handle_incoming({"from": E1, "id": "v1b", "type": "text", "text": {"body": "4 buses, Bhopal depot"}})
+            await settle()
+            r = said(await call("reply", text="Aur kuch?"))
+            assert "not_sent" in r and "Bhopal depot" in r and wa.SENT[-1]["text"] == "Kitni buses hain?"
+            assert not (await call("reply", text="Theek hai, 4 ki photo bhejiye")).get("isError")
+            del ctx["upto"]
             # their photo: saved in their folder, visible to the worker; nothing outside files/ and given/ is
             await wa.handle_incoming({"from": E1, "id": "v2", "type": "image",
                                       "image": {"id": f"local:{img}", "mime_type": "image/jpeg", "caption": "bus 1"}})
@@ -233,13 +242,17 @@ async def main():
             assert "held" in said(await call("reply", text="Photo bhejiye")) and wa.SENT[-1]["name"] == wa.ERRAND_TEMPLATE
             post = wa.wa_post
 
+            tried = []
+
             async def unapproved(path, json=None, form=None):  # Meta refuses the errand template: the doorbell goes
                 if ((json or {}).get("template") or {}).get("name") == wa.ERRAND_TEMPLATE:
+                    tried.append(json["template"])
                     raise RuntimeError("WhatsApp 404: template not approved")
                 return await post(path, json, form)
             wa.wa_post = unapproved
             await wa._ering(wa._eread(eid), E1)
             assert wa.SENT[-1]["name"] == wa.DOORBELL
+            assert [p["text"] for p in tried[0]["components"][0]["parameters"]] == ["Vipin sir", "check", "Bus readings"]
             wa.wa_post = post
             await wa.handle_incoming({"from": E1, "id": "v3", "type": "button", "button": {"text": "Dekhiye"}})
             await settle()
@@ -275,10 +288,16 @@ async def main():
             lines = wa._elines(eid, E1)
             b = wa._ebrief(wa._eread(eid), E1, lines, len(lines) - 1)
             assert b.count("\n# Instructions and answers") == 1 and "check (admin): haan de do" in b
-            # done: their messages stop reaching it, and the result is built once everyone is done
-            assert not (await call("done", summary="6 buses, readings in notes")).get("isError")
+            # done: their messages stop reaching it, the result is built once everyone is done, and their card keeps
+            # who they are for later errands
+            assert "both needed" in said(await call("done", summary="6 buses, readings in notes"))
+            assert not (await call("done", summary="6 buses, readings in notes",
+                                   remember="Transport incharge. Gave readings of 6 buses.")).get("isError")
             await settle()
             assert finals == [(eid, "everyone finished")]
+            card = (wa.CONTACTS / f"{E1}.md").read_text(encoding="utf-8")
+            assert card.startswith(f"# Vipin sir (+{E1})") and "Bus readings (for check): Transport incharge" in card
+            assert "Transport incharge" in wa._ebrief(wa._eread(eid), E1, wa._elines(eid, E1), 0)
             assert not await wa.handle_incoming({"from": E1, "id": "v5", "type": "text", "text": {"body": "aur?"}})
             assert "over for them" in said(await call("reply", text="x"))
         # the final report failed: the admin still gets what each person gave, and the errand closes
@@ -299,6 +318,7 @@ async def main():
         assert '"passed": 1' in said(r) and passed == [(E3, "mera leave letter")]
         assert (await wa.errand_tool(s, {"action": "cancel", "id": e2}))["cancelled"] == e2
         assert wa.SENT[-1] == {"to": E3, "type": "text", "text": "Ye kaam ab band kar diya gaya hai. Dhanyavaad 🙏"}
+        assert "didn't finish (the errand was cancelled)" in (wa.CONTACTS / f"{E3}.md").read_text(encoding="utf-8")
         # its own follow-up time wakes it; a passed deadline builds the result
         e3 = (await wa.errand_tool(s, {**add, "people": [{"name": "Driver", "number": E2}]}))["errand"]
         await settle()
