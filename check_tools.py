@@ -138,6 +138,14 @@ async def main():
         assert wa.SENT[-1]["text"].startswith("🤖 _Ye check main khud 3 baar")  # every 3rd: the owner hears anyway
         wa.Brain = brain
 
+        # memory keeper: the closing pass gets the cleanup rules and the size; a pass asked for while one runs waits
+        s.log, s.keeper_from = [("user", "kal meeting")], 0
+        kp = wa._keeper_take(s, final=True)
+        assert s.keeper_busy and "Tidy MEMORY.md" in kp and f"first {wa.MEMORY_CHARS}" in kp and "kal meeting" in kp
+        await wa.keeper(s)
+        assert s.keeper_again and wa._keeper_take(s) is None  # nothing new since
+        s.keeper_busy = s.keeper_again = False
+
         # photo cards: found when missing, one sheet for many, the model's answer parsed, done once
         from PIL import Image
         img = s.p / "files" / "2026-10-24" / "IMG-1.jpg"

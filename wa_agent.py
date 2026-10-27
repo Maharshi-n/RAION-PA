@@ -13,7 +13,7 @@ import av
 from aiohttp import web
 
 import docs, printing
-from brain import ENV, SYSTEM as CALL_SYSTEM, Brain, claude_args, deny_writes
+from brain import ENV, ENV_THINKING, SYSTEM as CALL_SYSTEM, Brain, claude_args, deny_writes
 
 ROOT = Path(__file__).parent
 MEM = ROOT / "memory"
@@ -33,7 +33,9 @@ ALLOWED = _nums("ALLOWED_NUMBERS") | ADMINS
 IDLE_MIN = float(os.environ.get("SESSION_IDLE_MIN", "60"))
 MODEL = os.environ.get("AGENT_MODEL") or os.environ.get("CLAUDE_MODEL") or "haiku"
 EFFORT = "high"  # low | medium | high: thinking for the chat agent (AGENT_EFFORT in .env is ignored)
-KEEPER_MODEL = os.environ.get("KEEPER_MODEL") or os.environ.get("CLAUDE_MODEL") or "haiku"  # memory keeper stays cheap
+KEEPER_MODEL, KEEPER_EFFORT = os.environ.get("KEEPER_MODEL") or "haiku", "low"  # memory keeper: quick save per reply
+CLOSE_MODEL, CLOSE_EFFORT = os.environ.get("CLOSE_MODEL") or "sonnet", "medium"  # its cleanup when a chat closes
+MEMORY_CHARS = 8000  # how much of MEMORY.md each chat starts with
 JOB_MODEL = os.environ.get("JOB_MODEL") or "sonnet"  # scheduled jobs (daily summaries, site checks)
 JOB_EFFORT = os.environ.get("JOB_EFFORT") or "high"  # their thinking (no hurry: nobody is waiting on a reply)
 # approved template that asks them to reply when an update waits outside WhatsApp's 24-hour window
@@ -496,6 +498,9 @@ message anyone; you check their results before anything reaches the person.
   something new from an old format, use today's facts (someone who has left is replaced by today's post holder).
 - __CORRECTIONS__
 - __SHARED__/QUESTIONS.md: open doubts, corrections waiting for an admin, and a log (Done) of what changed.
+- When what they say clashes with what someone else told you (the timeline, a fact file) and they aren't clearly
+  changing it themselves, say so in one line and ask which is right before using it. A line marked "clash, needs
+  confirming" in the timeline: ask the next person who would know.
 
 # Documents
 - You already know the institute's formats: look in its CATALOG.md and data/ before asking. Never ask for a format,
@@ -633,6 +638,9 @@ Where things go:
    replace outdated lines. Not facts about the institutes (policies, staff, fees, rules): those live in global/.
 3. PROFILE.md (this person) - name, post/role, language, reply preferences. Each fact once.
 4. __GLOBAL_RULE__
+Clashes: when the chat gives a date, time, name, number or instruction that differs from one someone ELSE gave
+(EVENTS.md lines say who asked), don't overwrite theirs: keep both on that line, e.g. "exam 05/11 (Sharma ji) /
+07/11 (Maharshi) - clash, needs confirming". When someone changes their own, just update it.
 __FINAL__
 Use Read/Edit/Write. Finish with one short line saying what changed, or NOTHING.
 
@@ -712,7 +720,7 @@ class Session:
             *(("\n# Open doubts (shared/QUESTIONS.md as of chat start)", open_doubts()) if self.admin else ()),
             *(("\n# Their automations (schedule tool)", jobs_text(self.num)) if self.admin else ()),
             "\n# PROFILE.md", _read(self.p / "PROFILE.md"),
-            "\n# MEMORY.md", _read(self.p / "MEMORY.md"),
+            "\n# MEMORY.md", _read(self.p / "MEMORY.md", MEMORY_CHARS),
             "\n# Institute (global/INSTITUTE.md)", _read(GLOBAL / "INSTITUTE.md"),
             "\n# House style (global/STYLE.md)", _read(GLOBAL / "STYLE.md"),
             "\n# Global files (global/INDEX.md)", _read(GLOBAL / "INDEX.md"),
@@ -775,12 +783,13 @@ class Session:
                 return
             while self.keeper_busy:
                 await asyncio.sleep(1)
-            if self.log:
-                await keeper(self, final=True)
+            prompt = _keeper_take(self, final=True) if self.log else None  # this chat's messages, taken now
             b, self.brain = self.brain, None  # cleared first, so pump() knows this exit was ours
             KEYS.pop(self.key, None)
             await b.close()
             await emit({"type": "wa_session", "num": self.num, "status": "closed"})
+        if prompt:  # the slow cleanup runs after the lock: a message arriving now starts a new chat at once
+            await keeper(self, final=True, prompt=prompt)
 
 
 def session(num, name="") -> Session:
@@ -1960,27 +1969,44 @@ def log_change(s: Session, files: list):
             f.write(f"- {datetime.now():%Y-%m-%d %H:%M} · +{s.num} · {Path(p).resolve().relative_to(MEM.resolve()).as_posix()}\n")
 
 
-async def keeper(s: Session, final=False):
-    """Background `claude -p` that saves only what's worth remembering. Writes only inside memory/."""
-    if s.keeper_busy and not final:
-        s.keeper_again = True  # run once more when the current pass ends, so no message is skipped
-        return
+def _keeper_take(s: Session, final=False) -> str | None:
+    """The keeper's prompt for the messages it hasn't seen yet (and marks it busy); None if there's nothing to do.
+    Nothing here awaits, so close() takes a closing chat's messages before a new chat can start."""
     new = s.log[s.keeper_from:]
     if not new and not final:
-        return
+        return None
     s.keeper_busy = True
     s.keeper_from = len(s.log)
+    # the closing pass reads the whole chat: the quick saves took it all already, and the summary needs it
+    convo = "\n\n".join(f"[{r.upper()}]\n{t}" for r, t in (s.log if final else new))[-30000:]
+    summary = f"sessions/{s.started:%Y-%m-%d_%H%M}.md"
+    size = len(_read(s.p / "MEMORY.md", 10**7))
+    return (KEEPER_PROMPT
+            .replace("__TODAY__", f"{datetime.now():%A %d/%m/%Y}").replace("__SHARED__", str(SHARED))
+            .replace("__WHO__", f"{s.name} (+{s.num}), {'an ADMIN' if s.admin else 'a staff member'}")
+            .replace("__GLOBAL_RULE__", f"Never edit {GLOBAL} or {SHARED / 'QUESTIONS.md'}: Raion updates the "
+                     "institute's facts itself during the chat.")
+            .replace("__FINAL__", f"This chat is now CLOSED and below is all of it (what's worth keeping is mostly "
+                     f"saved already: don't add it twice). Also:\n- Write a 3-6 line summary to {summary} (what was "
+                     "asked, what was made with file names, anything pending).\n- Tidy MEMORY.md and PROFILE.md: "
+                     "delete items that are clearly finished, cancelled or past (if unsure, keep it), merge "
+                     "duplicates, most important things at the top. Compress if you can without losing anything "
+                     f"important, but don't reword lines that are already fine. MEMORY.md is now {size} characters; "
+                     f"Raion sees only the first {MEMORY_CHARS} when a chat starts." if final else "")
+            .replace("__CONVO__", convo or "(no new messages)"))
+
+
+async def keeper(s: Session, final=False, prompt=None):
+    """Background `claude -p` that saves only what's worth remembering. Writes only inside memory/.
+    After every reply a quick save; when the chat closes (close() passes the prompt it took) also a summary and a
+    cleanup, by a stronger model."""
+    if prompt is None:
+        if s.keeper_busy:
+            s.keeper_again = True  # run once more when the current pass ends, so no message is skipped
+            return
+        if not (prompt := _keeper_take(s, final)):
+            return
     try:
-        convo = "\n\n".join(f"[{r.upper()}]\n{t}" for r, t in new)[-30000:]
-        summary = f"sessions/{s.started:%Y-%m-%d_%H%M}.md"
-        prompt = (KEEPER_PROMPT
-                  .replace("__TODAY__", f"{datetime.now():%A %d/%m/%Y}").replace("__SHARED__", str(SHARED))
-                  .replace("__WHO__", f"{s.name} (+{s.num}), {'an ADMIN' if s.admin else 'a staff member'}")
-                  .replace("__GLOBAL_RULE__", f"Never edit {GLOBAL} or {SHARED / 'QUESTIONS.md'}: Raion updates the "
-                           "institute's facts itself during the chat.")
-                  .replace("__FINAL__", f"This chat is now CLOSED: also write a 3-6 line summary to {summary} (what was "
-                           "asked, what was made with file names, anything pending)." if final else "")
-                  .replace("__CONVO__", convo or "(no new messages)"))
         deny = deny_writes(GLOBAL) + deny_writes(SHARED / "QUESTIONS.md", recursive=False)
         for d in ("files", "outbox", "tray", "work"):
             deny += deny_writes(s.p / d)
@@ -1988,10 +2014,15 @@ async def keeper(s: Session, final=False):
         # prompt goes in on stdin: --disallowedTools takes a variable list and would swallow a trailing argument
         proc = await asyncio.create_subprocess_exec(
             shutil.which("claude") or "claude",
-            *claude_args(KEEPER_MODEL, "Read,Write,Edit,Glob,Grep", [GLOBAL, SHARED], deny, "acceptEdits"),
+            *claude_args(CLOSE_MODEL if final else KEEPER_MODEL, "Read,Write,Edit,Glob,Grep", [GLOBAL, SHARED], deny,
+                         "acceptEdits", effort=CLOSE_EFFORT if final else KEEPER_EFFORT),
             cwd=s.p, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, env=ENV)
-        out, _ = await asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), 300)
+            stderr=asyncio.subprocess.DEVNULL, env=ENV_THINKING)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), 900 if final else 300)
+        except asyncio.TimeoutError:
+            proc.kill()  # else it keeps writing while the next pass starts
+            raise
         after = _snapshot()
         changed = [f for f, m in after.items() if before.get(f) != m]
         if changed:
@@ -2004,7 +2035,7 @@ async def keeper(s: Session, final=False):
         print("keeper failed:", repr(e))
     finally:
         s.keeper_busy = False
-        if s.keeper_again and not final:
+        if s.keeper_again:  # messages that came while this ran (after a closing pass: a new chat's)
             s.keeper_again = False
             asyncio.create_task(keeper(s))
 
