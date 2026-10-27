@@ -55,7 +55,7 @@ SENT: list[dict] = []  # DRY_RUN: what would have been sent
 SEEN: collections.deque = collections.deque(maxlen=500)  # WhatsApp can deliver a webhook twice
 SESSIONS: dict[str, "Session"] = {}
 KEYS: dict[str, "Session"] = {}  # tool API key -> chat (each chat's raion_mcp.py gets its own)
-JOB_KEYS: dict[str, tuple] = {}  # an automation run's key -> (their chat, files it built): build tools only
+JOB_KEYS: dict[str, tuple] = {}  # an automation run's key -> (their chat, files it built, the job): build tools only
 
 
 async def emit(msg):
@@ -529,7 +529,13 @@ the site's notices/news page rather than just its home page. Confirm in one line
 couldn't be opened or may be missed. Automations can also make a file (PDF, Excel, Word, slides, an image card) and
 send it with the message: put in task which file, what goes in it and which office format to fill (its path); they
 can't run code or ask anything, so give every detail. Change: add with the same id; "band kar do": remove; "ek baar
-abhi dikhao": run. Their updates reach them by themselves (after a day without messages, a short notice asks them to reply first); jobs/log.md has every one.
+abhi dikhao": run.
+Follow-ups on your own (strict): set one yourself ONLY when it is really important and would be missed otherwise:
+something you promised to check or tell them later ("result aate hi bataunga"), or a deadline or reply they're
+waiting on that must be checked at a certain time. Never for convenience, small talk, routine things or "just in
+case": if in doubt, don't. Then: schedule add with own true, one date and time (no days, no call) and a complete
+brief, and tell them in one line ("6 baje phir check karke bata dunga"). At most 2 can wait at a time.
+Their updates reach them by themselves (after a day without messages, a short notice asks them to reply first); jobs/log.md has every one.
 Reminders by phone ("kal subah 10 baje phone karke yaad dilana"): schedule add with call true, a date (once: it
 deletes itself after) or days, and the time; task = the reminder itself in their words with every detail, dates
 written as dates (not "kal": it's heard on another day). At that
@@ -1123,10 +1129,13 @@ TOOLS = [
            "sites": {"type": "array", "items": S, "description": "web pages to watch (notice/news pages): each run gets "
                                                                  "only what's new on them"},
            "call": {**B, "description": "a reminder by phone: you call them on WhatsApp at that time and say it (task "
-                                        "= the reminder in their words); if they don't pick up it comes as a message"}},
+                                        "= the reminder in their words); if they don't pick up it comes as a message"},
+           "own": {**B, "description": "true when you set it yourself, not asked: a one-time follow-up, only when "
+                                       "really important (see the Automations rules)"}},
           ["action"], admin=True),
 ]
-BUILD_TOOLS = ("make_pdf", "make_image", "make_office", "fill_xlsx", "fill_docx")  # all an automation run gets
+BUILD_TOOLS = ("make_pdf", "make_image", "make_office", "fill_xlsx", "fill_docx")
+JOB_TOOLS = BUILD_TOOLS + ("schedule",)  # all an automation run gets (schedule: only adding one follow-up)
 SEND_KIND = {".jpg": "image", ".jpeg": "image", ".png": "image", ".mp4": "video"}
 SEND_MAX_MB = {"image": 5, "video": 16}  # WhatsApp's limits; bigger goes as a document (up to 100 MB)
 
@@ -1322,8 +1331,6 @@ async def run_tool(s: Session, op: str, a: dict) -> tuple[dict, list]:
         await emit({"type": "print", "num": s.num, "printer": printer, "copies": copies, "file": pdf.name})
         return {"printer": printer, "copies": copies, "paper": paper}, []
     if op == "schedule":
-        if not s.admin:
-            raise PermissionError("automations are only for admins")
         return await schedule(s, a), []
     raise ValueError(f"unknown tool '{op}'")
 
@@ -1345,21 +1352,22 @@ async def tool_api() -> str:
 
 
 def _caller(req) -> tuple:
-    """(chat, None) for a chat's key; (chat, files built) for an automation run's, which gets only the build tools."""
+    """(chat, None, None) for a chat's key; (chat, files built, job) for an automation run's, which gets only the
+    build tools and schedule (for one follow-up of its own)."""
     k = req.headers.get("X-Raion-Key", "")
-    return JOB_KEYS.get(k) or (KEYS.get(k), None)
+    return JOB_KEYS.get(k) or (KEYS.get(k), None, None)
 
 
 async def _api_tools(req):
-    s, built = _caller(req)
+    s, built, _ = _caller(req)
     if not s:
         return web.Response(status=403)
     return web.json_response([{k: v for k, v in t.items() if k != "admin"} for t in TOOLS
-                              if (s.admin or not t["admin"]) and (built is None or t["name"] in BUILD_TOOLS)])
+                              if (s.admin or not t["admin"]) and (built is None or t["name"] in JOB_TOOLS)])
 
 
 async def _api_call(req):
-    s, built = _caller(req)
+    s, built, job = _caller(req)
     if not s:
         return web.Response(status=403)
     body = await req.json()
@@ -1368,9 +1376,12 @@ async def _api_call(req):
     await emit({"type": "tool", "name": op, "args": args, "num": s.num})
     s.add_log("tool", f"{op} {json.dumps(args, ensure_ascii=False)[:2000]}", keep=False)
     try:
-        if built is not None and op not in BUILD_TOOLS:
-            raise PermissionError(f"automations can only build files, not {op}")
-        res, images = await run_tool(s, op, args)
+        if built is not None and op not in JOB_TOOLS:
+            raise PermissionError(f"automations can only build files and set a follow-up, not {op}")
+        if job and op == "schedule":
+            res, images = await schedule(s, args, parent=job), []
+        else:
+            res, images = await run_tool(s, op, args)
         if built is not None and res.get("file"):
             built.append(s.p / res["file"])
         content = [{"type": "text", "text": json.dumps({"ok": True, **res}, ensure_ascii=False)}]
@@ -1395,6 +1406,10 @@ nothing is, reply exactly NOTHING.
   tools as the rules below say, writing your own files only in __WORK__ (where they say work/). You can't run code
   or ask anything: use the obvious default or a dotted blank. Every file you build goes out with your message (its
   caption), except builds still showing [placeholders]: build only the final ones.
+- Follow-up (strict): ONLY when the task can't be finished now for a reason that changes soon (a result not out yet,
+  a reply or decision awaited) and missing it would really matter, you may set ONE one-time follow-up: raion schedule,
+  action add, a date and time, task = a complete brief for that run (what to check, what you found so far, what to
+  send). Never to repeat a routine, never "just in case". Say it in your message in one line.
 - Their profile:
 __PROFILE__
 
@@ -1403,6 +1418,8 @@ __PROFILE__
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 MAX_JOBS, MAX_SITES = 10, 10
+MAX_OWN, LOOP_NOTE = 2, 3  # follow-ups Raion sets itself: waiting at once; every this many in a row (each run
+# setting the next), the owner is told even if there's nothing new
 WINDOW_H = 23.5  # WhatsApp allows free messages for 24 h after their last one (a little margin)
 LATE_H = 12  # a run missed while the computer was off still happens if it was due within this many hours
 JOB_LOCK = asyncio.Lock()  # ponytail: one job at a time; jobs due the same minute just queue
@@ -1427,7 +1444,8 @@ def _jwrite(num, name, data):
 
 def jobs_text(num) -> str:
     return "\n".join(f"- {j['id']}: {j['date'] or ', '.join(j['days']) or 'daily'} at {j['time']}"
-                     + (" — 📞 call" if j.get("call") else "") + f" — {j['task'][:300]}"
+                     + (" — 📞 call" if j.get("call") else "") + (" — 🤖 set by you" if j.get("own") else "")
+                     + f" — {j['task'][:300]}"
                      + (f" — watching {', '.join(j['sites'])}" if j["sites"] else "")
                      for j in _jread(num, "jobs.json", [])) or "(none)"
 
@@ -1519,9 +1537,14 @@ async def watch(num, job_id, sites) -> tuple[str, list]:
     return "\n".join(lines), status
 
 
-async def schedule(s: Session, a: dict) -> dict:
-    act, jobs = a.get("action"), _jread(s.num, "jobs.json", [])
-    job = next((j for j in jobs if j["id"] == a.get("id")), None)
+async def schedule(s: Session, a: dict, parent: dict | None = None) -> dict:
+    """parent: the automation whose run is calling (it may only add one follow-up of its own)."""
+    if not s.admin:
+        raise PermissionError("automations are only for admins")
+    act, jobs, own = a.get("action"), _jread(s.num, "jobs.json", []), bool(a.get("own")) or parent is not None
+    if parent is not None and act != "add":
+        raise PermissionError("an automation run can only add a follow-up")
+    job = None if own and act == "add" else next((j for j in jobs if j["id"] == a.get("id")), None)
     if act == "list":
         return {"jobs": jobs}
     if act in ("remove", "run") and not job:
@@ -1551,15 +1574,22 @@ async def schedule(s: Session, a: dict) -> dict:
         else:
             raise ValueError(f"day '{d}': use mon..sun or 1..31")
     day = str(a.get("date") or "").strip() or None
-    if day and date.fromisoformat(day) < date.today():
-        raise ValueError("that date has passed")
+    if day and datetime.combine(date.fromisoformat(day), dtime(int(tm[:-3]), int(tm[-2:]))) <= datetime.now():
+        raise ValueError("that time has passed")  # it would never run (nor be removed)
+    if own:
+        if not day or days or a.get("call"):
+            raise ValueError("a follow-up you set yourself is one time only: a date and time, no days, no call")
+        depth = (parent or {}).get("own", 0) + 1  # how many in a row
+        if sum(1 for j in jobs if j.get("own")) >= MAX_OWN:
+            raise ValueError(f"{MAX_OWN} follow-ups you set yourself are already waiting: no more")
     if not job and len(jobs) >= MAX_JOBS:
         raise ValueError(f"at most {MAX_JOBS} automations per person: remove one first")
-    jid = re.sub(r"[^\w-]", "", str(a.get("id") or "")) or \
-        next(f"j{i}" for i in range(1, 100) if f"j{i}" not in {j["id"] for j in jobs})
+    jid = ("" if own else re.sub(r"[^\w-]", "", str(a.get("id") or ""))) or \
+        next(f"j{i}" for i in range(1, 100) if f"j{i}" not in {j["id"] for j in jobs})  # own: never replaces one
     sites = list(dict.fromkeys(str(u).strip() for u in a.get("sites") or [] if str(u).strip()))[:MAX_SITES]
     new = {"id": jid, "task": task, "time": f"{int(tm[:-3]):02d}:{tm[-2:]}", "days": days, "date": day,
-           "sites": sites, "call": bool(a.get("call")), "created": datetime.now().isoformat(timespec="seconds")}
+           "sites": sites, "call": bool(a.get("call")), "created": datetime.now().isoformat(timespec="seconds"),
+           **({"own": depth} if own else {})}
     # first look at new sites: remembers what's there now, so runs report only what comes later
     _, status = await watch(s.num, jid, [u for u in sites if not (_jdir(s.num) / _site_file(jid, u)).exists()])
     for st in status:
@@ -1637,7 +1667,7 @@ async def run_job(num, job, late=False, sample=False):
                           .replace("__PY__", sys.executable)
                           .replace("__PROFILE__", _read(PEOPLE / num / "PROFILE.md", 2000)), encoding="utf-8")
         key, built = secrets.token_urlsafe(24), []
-        JOB_KEYS[key] = (session(num), built)
+        JOB_KEYS[key] = (session(num), built, job)
         mcp = {"raion": {"command": sys.executable, "args": ["-I", str(ROOT / "raion_mcp.py")],
                          "env": {"RAION_URL": await tool_api(), "RAION_KEY": key}}}
         # no code and no messages: it reads, writes only in jobs/work/ (deny_writes' rule, as an allow) and builds
@@ -1678,6 +1708,9 @@ async def run_job(num, job, late=False, sample=False):
                 files.append(Path(shutil.copy2(p, out / p.name)))
         if late:
             text = "_(der se: us samay computer band tha)_\n" + text
+    if (n := job.get("own", 0)) and n % LOOP_NOTE == 0:  # a chain of its own follow-ups never runs unseen
+        text = (f"🤖 _Ye check main khud {n} baar lagatar kar chuka hoon: {job['task'][:80]}. Rokna ho to bolo "
+                "\"band kar do\"._" + ("\n\n" + text if text else ""))
     with open(_jdir(num) / "log.md", "a", encoding="utf-8") as f:
         f.write(f"## {datetime.now():%Y-%m-%d %H:%M} · {job['id']}{' · sample' if sample else ''}"
                 f"{' · late' if late else ''}\n{text or '(nothing new: not sent)'}"

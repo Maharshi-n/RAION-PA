@@ -1,6 +1,6 @@
 """Self-check for Raion's tool plumbing, no model and nothing sent: raion_mcp.py <-> tool API <-> run_tool.
 Run: .venv\\Scripts\\python.exe check_tools.py"""
-import asyncio, json, os, shutil, sys
+import asyncio, json, os, shutil, sys, time
 from datetime import datetime as D
 
 NUM = "919000000099"
@@ -34,14 +34,17 @@ async def main():
         r = await rpc(5, "tools/call", {"name": "send_message", "arguments": {"text": "नमस्ते"}})
         assert not r.get("isError") and wa.SENT[-1]["text"] == "नमस्ते"  # Hindi survives the pipe
 
-        # an automation run's key: only the build tools, and what it builds is kept to go with its message
-        built = []
-        wa.JOB_KEYS["jk"] = (s, built)
+        # an automation run's key: only the build tools (and schedule, to add a follow-up), and what it builds is
+        # kept to go with its message
+        s.admin, built = True, []  # automations are for admins
+        wa.JOB_KEYS["jk"] = (s, built, {"id": "p"})
         (s.p / "work" / "u.html").write_text("<html><body><h1>Report</h1></body></html>", encoding="utf-8")
         async with wa.aiohttp.ClientSession(await wa.tool_api(), headers={"X-Raion-Key": "jk"}) as c:
-            assert {t["name"] for t in await (await c.get("/tools")).json()} == set(wa.BUILD_TOOLS)
+            assert {t["name"] for t in await (await c.get("/tools")).json()} == set(wa.JOB_TOOLS)
             r = await (await c.post("/call", json={"name": "send_message", "arguments": {"text": "x"}})).json()
             assert r.get("isError") and "only build" in r["content"][0]["text"]
+            r = await (await c.post("/call", json={"name": "schedule", "arguments": {"action": "list"}})).json()
+            assert r.get("isError") and "only add" in r["content"][0]["text"]
             await (await c.post("/call", json={"name": "make_pdf", "arguments": {"html": "work/u.html", "name": "u"}})).json()
         assert built == [s.p / "outbox" / "u.pdf"], built
 
@@ -93,6 +96,47 @@ async def main():
                                               "## 2026-10-24 23:00 · j1 · late\nnews B\n\n", encoding="utf-8")
         assert [p.split("\n")[1] for p in wa.last_sent(NUM, "j1")] == ["news A", "news B"]  # what the next run sees
         assert (await wa.schedule(s, {"action": "remove", "id": "j1"}))["removed"] == "j1"
+
+        # follow-ups Raion sets itself: one time only, never replacing one, at most 2 waiting; a long chain is told
+        async def refused(a, **kw):
+            try:
+                await wa.schedule(s, a, **kw)
+            except (ValueError, PermissionError) as e:
+                return str(e)
+            assert False, f"accepted: {a}"
+        f = {"action": "add", "task": "result check", "time": "10:00", "date": "2099-01-02", "own": True, "id": "j2"}
+        assert (await wa.schedule(s, f))["saved"]["own"] == 1
+        assert [bool(j["call"]) for j in wa._jread(NUM, "jobs.json", [])] == [True, False]  # the call j2 is kept
+        assert "one time only" in await refused({**f, "date": None, "days": ["mon"]})
+        assert "one time only" in await refused({**f, "call": True})
+        assert "passed" in await refused({**f, "date": "2020-01-01"})
+        assert (await wa.schedule(s, f, parent={"own": 3}))["saved"]["own"] == 4  # a run's follow-up: no chain limit
+        assert "already waiting" in await refused(f) and "🤖" in wa.jobs_text(NUM)
+
+        class Quiet:  # an automation run that finds nothing new
+            cost_usd = 0
+
+            def __init__(self, **kw):
+                pass
+
+            async def start(self):
+                pass
+
+            async def send(self, t):
+                pass
+
+            async def events(self):
+                yield {"type": "result", "result": "NOTHING"}
+
+            async def close(self):
+                pass
+        wa.Brain, brain, sent = Quiet, wa.Brain, len(wa.SENT)
+        wa._jwrite(NUM, "window.json", {"last_in": time.time()})
+        await wa.run_job(NUM, {**f, "id": "q", "own": 2, "sites": []})
+        assert len(wa.SENT) == sent  # 2nd in a row, nothing new: quiet
+        await wa.run_job(NUM, {**f, "id": "q", "own": 3, "sites": []})
+        assert wa.SENT[-1]["text"].startswith("🤖 _Ye check main khud 3 baar")  # every 3rd: the owner hears anyway
+        wa.Brain = brain
 
         # photo cards: found when missing, one sheet for many, the model's answer parsed, done once
         from PIL import Image
