@@ -32,12 +32,12 @@ ADMINS = _nums("ADMIN_NUMBERS")
 ALLOWED = _nums("ALLOWED_NUMBERS") | ADMINS
 IDLE_MIN = float(os.environ.get("SESSION_IDLE_MIN", "60"))
 MODEL = os.environ.get("AGENT_MODEL") or os.environ.get("CLAUDE_MODEL") or "haiku"
-EFFORT = "high"  # low | medium | high: thinking for the chat agent (AGENT_EFFORT in .env is ignored)
+EFFORT = "medium"  # low | medium | high: thinking for the chat agent (AGENT_EFFORT in .env is ignored)
 KEEPER_MODEL, KEEPER_EFFORT = os.environ.get("KEEPER_MODEL") or "haiku", "low"  # memory keeper: quick save per reply
-CLOSE_MODEL, CLOSE_EFFORT = os.environ.get("CLOSE_MODEL") or "sonnet", "medium"  # its cleanup when a chat closes
+CLOSE_MODEL, CLOSE_EFFORT = os.environ.get("CLOSE_MODEL") or "sonnet", "low"  # its cleanup when a chat closes
 MEMORY_CHARS = 8000  # how much of MEMORY.md each chat starts with
 JOB_MODEL = os.environ.get("JOB_MODEL") or "sonnet"  # scheduled jobs (daily summaries, site checks)
-JOB_EFFORT = os.environ.get("JOB_EFFORT") or "high"  # their thinking (no hurry: nobody is waiting on a reply)
+JOB_EFFORT = "low"  # their thinking (JOB_EFFORT in .env is ignored)
 # approved template that asks them to reply when an update waits outside WhatsApp's 24-hour window
 DOORBELL = os.environ.get("WA_DOORBELL_TEMPLATE", "raion_message_waiting")
 DOORBELL_LANG = os.environ.get("WA_DOORBELL_LANG", "hi")
