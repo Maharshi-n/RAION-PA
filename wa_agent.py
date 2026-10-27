@@ -37,7 +37,7 @@ KEEPER_MODEL, KEEPER_EFFORT = os.environ.get("KEEPER_MODEL") or "haiku", "low"  
 CLOSE_MODEL, CLOSE_EFFORT = os.environ.get("CLOSE_MODEL") or "sonnet", "low"  # its cleanup when a chat closes
 MEMORY_CHARS = 8000  # how much of MEMORY.md each chat starts with
 JOB_MODEL = os.environ.get("JOB_MODEL") or "sonnet"  # scheduled jobs (daily summaries, site checks)
-JOB_EFFORT = "low"  # their thinking (JOB_EFFORT in .env is ignored)
+JOB_EFFORT = "medium"  # their thinking (JOB_EFFORT in .env is ignored)
 # approved template that asks them to reply when an update waits outside WhatsApp's 24-hour window
 DOORBELL = os.environ.get("WA_DOORBELL_TEMPLATE", "raion_message_waiting")
 DOORBELL_LANG = os.environ.get("WA_DOORBELL_LANG", "hi")
