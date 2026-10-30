@@ -55,3 +55,7 @@ You set it up once, then the watchdog keeps it running and pulls Maharshi's code
 - Updates: every 10 minutes the watchdog pulls new code from GitHub when no chat is mid-reply, runs check_tools.py,
   and restarts Raion. If the check fails it keeps the old code and writes "FAILED" in watchdog.log.
 - Raion stops replying and server.err.log says Claude is not logged in: the user runs `claude auth login`.
+- 1:00-2:00 AM is the maintenance hour: chats get a short "maintenance" reply, nothing runs, code updates wait, and
+  Raion backs up memory\ and tidies it. memory\CHANGELOG.md lists what each night did.
+- memory\MIGRATION_PLAN.md: the plan of the one-time memory move (written the first night after the update). Nothing
+  changes until Maharshi approves it from his laptop.

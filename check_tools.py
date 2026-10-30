@@ -14,6 +14,9 @@ import wa_agent as wa
 
 
 async def main():
+    maint = wa.in_maintenance
+    wa.in_maintenance = lambda t=None: maint(t) if t else False  # a check run at 1 AM still checks the daytime paths
+    paths = wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP  # the memory tests swap in a copy
     s = wa.session(NUM, "check")
     s.key = "k"
     wa.KEYS["k"] = s
@@ -142,13 +145,16 @@ async def main():
         assert wa.SENT[-1]["text"].startswith("🤖 _Ye check main khud 3 baar")  # every 3rd: the owner hears anyway
         wa.Brain = brain
 
-        # memory keeper: the closing pass gets the cleanup rules and the size; a pass asked for while one runs waits
+        # memory keeper (old layout: the real memory may be on either): the closing pass gets the cleanup rules and
+        # the size; a pass asked for while one runs waits
+        v2, wa.v2 = wa.v2, lambda: False
         s.log, s.keeper_from = [("user", "kal meeting")], 0
         kp = wa._keeper_take(s, final=True)
         assert s.keeper_busy and "Tidy MEMORY.md" in kp and f"first {wa.MEMORY_CHARS}" in kp and "kal meeting" in kp
         await wa.keeper(s)
         assert s.keeper_again and wa._keeper_take(s) is None  # nothing new since
         s.keeper_busy = s.keeper_again = False
+        wa.v2 = v2
 
         # errands: an admin's job done through other people; their messages reach only that errand while it's open,
         # and its worker can only message them, look at their files and ask the admin
@@ -436,6 +442,182 @@ async def main():
         s.brain = r3.brain = None
         s.busy = r3.busy = s.relay_turn = r3.relay_turn = False
 
+        # memory, new layout, all on a copy (the real memory is never touched): the one-time move (a plan first, then
+        # lines only move), what a chat starts with (limits, counts, the timeline by date, doubts per person, topic
+        # names, the admins' area only for admins), the keeper's rules, the nightly tidy and the maintenance hour
+        wa.MEM = Path(tempfile.mkdtemp())
+        wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE = wa.MEM / "shared", wa.MEM / "admin", wa.MEM / "people"
+        wa.HELD, wa.NIGHT_STAMP = wa.MEM / "held.jsonl", wa.MEM / "nightly"
+        wa.ADMIN_MEM.mkdir(parents=True)
+        wa.SHARED.mkdir()
+        (wa.ADMIN_MEM / "EVENTS.md").write_text(wa.ADMIN_EVENTS_HEAD, encoding="utf-8")
+        t = wa.date.today()
+
+        def day(n):
+            return f"{t + wa.timedelta(days=n):%d/%m/%Y}"
+        (wa.SHARED / "EVENTS.md").write_text(
+            f"# Institute timeline\n\n## Upcoming\n- {day(5)} - PTM - parents - asked by Maharshi\n"
+            f"- {day(1)} 18:00 - fridge rate deadline - errand e1 - quoted 26,500\n"
+            f"- {day(-2)} - {day(2)} - Udaipur tour - tour students\n- sports day, date not fixed yet\n"
+            f"## Past\n- {day(-3)} - DHO letter sent\n- {day(-60)} - old meeting\n", encoding="utf-8")
+        A, S = NUM, E3  # an admin, a staff member
+        wa.ADMINS.add(A)
+        pa, ps = wa.person_dir(A), wa.person_dir(S)
+        (pa / "MEMORY.md").write_text("# Memory\n- Letters always in Hindi (Maharshi, 20/10/2026)\n- Pending: UDISE "
+                                      "sheet not filled (sent 24/10/2026)\n- **Pending:** poster photos\n", encoding="utf-8")
+        (ps / "MEMORY.md").write_text("# Memory\n" + "- a standing rule of this staff member\n" * 80, encoding="utf-8")
+        v = wa.events_view(False)  # the old layout already gets the timeline by date
+        assert v.index("Udaipur") < v.index("fridge") < v.index("PTM") and "sports day" in v.split("Coming up")[0]
+        assert "DHO letter" in v.split("Last 7 days:")[1] and "old meeting" not in v and "+1 older events" in v
+        plan = wa.migrate(False)
+        assert not wa.v2() and "Pending" in (pa / "MEMORY.md").read_text(encoding="utf-8")  # a plan changes nothing
+        assert "to TODO.md: UDISE sheet not filled (sent 24/10/2026)" in plan and "to TODO.md: poster photos" in plan
+        assert "1 errand lines" in plan and "26,500" in plan and (wa.MEM / "MIGRATION_PLAN.md").exists()
+        wa.migrate(True)
+        mem = (pa / "MEMORY.md").read_text(encoding="utf-8")
+        assert wa.v2() and "Pending" not in mem and "Letters always in Hindi" in mem
+        todo = (pa / "TODO.md").read_text(encoding="utf-8")
+        assert f"- [ ] UDISE sheet not filled (sent 24/10/2026) (added {day(0)})" in todo and "- [ ] poster photos" in todo
+        ev = (wa.SHARED / "EVENTS.md").read_text(encoding="utf-8")
+        assert "26,500" not in ev and "26,500" in (wa.ADMIN_MEM / "EVENTS.md").read_text(encoding="utf-8")
+        assert "DHO letter" in ev and "old meeting" not in ev  # a week's grace, then past/<month>
+        assert "old meeting" in (wa.SHARED / "past" / f"{t - wa.timedelta(days=60):%Y-%m}.md").read_text(encoding="utf-8")
+        assert "26,500" not in wa.events_view(False) and "🔒" in wa.events_view(True)
+        wa._append(wa.SHARED / "EVENTS.md", [f"- {day(10 + i % 20)} - event {i} " + "x" * 60 for i in range(100)])
+        v = wa.events_view(False)
+        assert len(v) < wa.EVENTS_CHARS + 400 and re.search(r"\+\d+ more coming up", v), len(v)
+        wa._append(pa / "TODO.md", [f"- [ ] task {i} (added {day(-40)})" for i in range(25)]
+                   + [f"- [x] done one (done {day(-10)})", "- [x] done today"])
+        tv = wa.todo_view(pa)
+        assert tv.count("- [ ]") == wa.TODO_SHOWN and "+7 more open to-dos" in tv and "done" not in tv
+        (wa.SHARED / "QUESTIONS.md").write_text("# Doubts\n\n## Open\n" + "".join(f"- doubt {i}?\n" for i in range(6))
+                                                + "- MNDC fees? (for: Manoj ji +919926636660)\n- bus timings? (for: "
+                                                "Vimal)\n\n## Done\n", encoding="utf-8")
+        d = wa.open_doubts(A, "Maharshi")
+        assert d.count("doubt ") == 5 and "+1 more open doubts" in d and "fees" not in d and "2 more are for" in d
+        assert "MNDC fees" in wa.open_doubts("919926636660", "Dr Manoj") and "bus" in wa.open_doubts("1", "Vimal T")
+        (wa.SHARED / "topics").mkdir()
+        (wa.SHARED / "topics" / "Udaipur tour 2026.md").write_text("# Udaipur tour 2026\nStatus: open\n", encoding="utf-8")
+        (wa.ADMIN_MEM / "topics").mkdir()
+        (wa.ADMIN_MEM / "topics" / "Fridge 2026.md").write_text("# Fridge\nStatus: done 01/01/2020\n", encoding="utf-8")
+        assert "Udaipur tour 2026 (shared)" in wa.topics_view(S, False) and "Fridge" not in wa.topics_view(S, False)
+        assert "Fridge 2026 (admins only, done)" in wa.topics_view(A, True)
+        ba, bs = wa.Session(A, "Maharshi").briefing(), wa.Session(S, "Sharma ji").briefing()
+        assert re.search(r"# MEMORY\.md \d+% — [\d,]+/4,000 characters", ba) and "Open to-dos" in ba
+        assert "# Memory and topic files" in ba and "# Memory and topic files" in bs
+        assert "26,500" in ba and "Fridge 2026" in ba and str(wa.ADMIN_MEM) in ba
+        assert "26,500" not in bs and "Fridge" not in bs and str(wa.ADMIN_MEM) not in bs and "# MEMORY.md 1" in bs
+        assert not re.search(r"__[A-Z_]+__", ba + bs)  # every placeholder filled
+        ka, ks = wa.Session(A, "Maharshi"), wa.Session(S, "Sharma ji")
+        ka.log = ks.log = [("user", "kal meeting")]
+        kp, kq = wa._keeper_take(ka, final=True), wa._keeper_take(ks)
+        assert "4,000 characters" in kp and str(wa.ADMIN_MEM / "EVENTS.md") in kp and "summary to sessions/" in kp
+        assert "2,500 characters" in kq and str(wa.ADMIN_MEM) not in kq and "summary" not in kq
+        assert not re.search(r"__[A-Z_]+__", kp + kq)
+
+        class Spy:  # a chat's CLI, to see its permissions: staff never even see the admins' area
+            alive = True
+
+            def __init__(self, **kw):
+                Spy.kw = kw
+
+            async def start(self):
+                pass
+
+            async def events(self):  # ends at once: nothing left running when the check exits
+                return
+                yield
+        brain, wa.Brain = wa.Brain, Spy
+        await wa.Session(S, "Sharma ji").ensure_brain()
+        assert wa.deny_reads(wa.ADMIN_MEM)[0] in Spy.kw["deny"] and wa.ADMIN_MEM not in Spy.kw["cwd_dirs"]
+        assert wa.deny_writes(ps / "TODO.md", recursive=False)[0] in Spy.kw["deny"]
+        await wa.Session(A, "Maharshi").ensure_brain()
+        assert wa.ADMIN_MEM in Spy.kw["cwd_dirs"] and wa.deny_reads(wa.ADMIN_MEM)[0] not in Spy.kw["deny"]
+        wa.Brain = brain
+        # the nightly tidy, by date: done to-dos a week old to ARCHIVE.md (one without its date gets today's),
+        # topics finished 30 days ago to done/; the Sonnet pass only for who needs it, once a night
+        wa.tidy()
+        todo = (pa / "TODO.md").read_text(encoding="utf-8")
+        assert "done one" not in todo and f"- [x] done today (done {day(0)})" in todo
+        assert "(from TODO.md) [x] done one" in (pa / "ARCHIVE.md").read_text(encoding="utf-8")
+        assert (wa.ADMIN_MEM / "topics" / "done" / "Fridge 2026.md").exists()
+        assert (wa.SHARED / "topics" / "Udaipur tour 2026.md").exists()
+        assert wa.needs_cleanup(ps) and not wa.needs_cleanup(pa) and "TODO.md" in wa.needs_cleanup(pa, sunday=True)[0]
+        ran = []
+
+        async def fake_cleanup(num, why, until):
+            ran.append(num)
+            return "moved 3 lines"
+
+        async def fake_events(until):
+            ran.append("timeline")
+
+        async def fake_backup(wait=False):
+            return True
+        cleanup, events, backup = wa.cleanup, wa.cleanup_events, wa.backup_memory
+        wa.cleanup, wa.cleanup_events, wa.backup_memory = fake_cleanup, fake_events, fake_backup
+        until = wa.datetime.now() + wa.timedelta(hours=1)
+        await wa.nightly(until)
+        sunday = t.weekday() == 6
+        assert ran == [S] + ([A, "timeline"] if sunday else []), ran  # people in number order
+        log = (wa.MEM / "CHANGELOG.md").read_text(encoding="utf-8")
+        assert f"+{S} cleanup (MEMORY.md 1" in log and "moved 3 lines" in log
+        await wa.nightly(until)
+        assert len(ran) == (3 if sunday else 1)  # once a night
+        wa.NIGHT_STAMP.unlink()
+        (wa.MEM / ".memory_v2").unlink()  # before the move, a night only writes the plan
+        await wa.nightly(until)
+        assert not wa.v2() and "plan in MIGRATION_PLAN.md" in (wa.MEM / "CHANGELOG.md").read_text(encoding="utf-8")
+        wa.cleanup, wa.cleanup_events, wa.backup_memory = cleanup, events, backup
+        runs = []
+
+        async def fake_once(prompt, cwd, dirs, deny, tools, seconds):  # the Sonnet runs, without the model
+            runs.append((prompt, cwd, dirs, deny, tools))
+            return "NOTHING"
+        once, wa.claude_once = wa.claude_once, fake_once
+        await wa.cleanup(S, wa.needs_cleanup(ps), until)
+        await wa.cleanup_events(until)
+        (pr, cwd, dirs, deny, tools), (pe, cwe, dire, denye, toolse) = runs
+        assert cwd == ps and dirs == [] and "Write" in tools and "2,500" in pr and "MEMORY.md 1" in pr
+        assert wa.deny_writes(ps / "files")[0] in deny and wa.deny_writes(ps / "topics")[0] in deny
+        assert cwe == wa.SHARED and dire == [wa.ADMIN_MEM] and "Write" not in toolse and str(wa.ADMIN_MEM) in pe
+        assert wa.deny_writes(wa.SHARED / "QUESTIONS.md", recursive=False)[0] in denye
+        assert not re.search(r"__[A-Z_]+__", pr + pe)
+        wa.claude_once = once
+        # the maintenance hour: nothing set then (an errand's wake moves to 2:00), old automations moved once and
+        # their owner told; Raion's people are told once and their message dropped; an errand's people wait till 2
+        assert maint(D(2026, 1, 1, 1, 30)) and not maint(D(2026, 1, 1, 0, 59)) and not maint(D(2026, 1, 1, 2, 0))
+        assert "maintenance" in await refused({"action": "add", "task": "x", "time": "01:30"})
+        assert wa._when("2099-01-01 01:30") == D(2099, 1, 1, 2, 0)
+        wa._jwrite(A, "jobs.json", [{"id": "n", "task": "night news", "time": "01:30", "days": [], "date": None,
+                                     "sites": [], "call": False, "created": "2026-01-01T00:00:00"}])
+        wa._jwrite(A, "window.json", {"last_in": time.time()})
+        await wa.move_night_jobs()
+        j = wa._jread(A, "jobs.json", [])[0]
+        assert j["time"] == "02:00" and "moved from 01:30" in wa.jobs_text(A) and "night news" in wa.SENT[-1]["text"]
+        wa.in_maintenance = lambda t=None: maint(t) if t else True
+        n = len(wa.SENT)
+        await wa.handle_incoming({"from": NUM, "id": "m1", "type": "text", "text": {"body": "hello"}})
+        await wa.handle_incoming({"from": NUM, "id": "m2", "type": "text", "text": {"body": "hello?"}})
+        assert len(wa.SENT) == n + 1 and wa.SENT[-1]["text"] == wa.MAINT_TEXT
+        wa.busy_mark()
+        assert (wa.RUNTIME / "busy").read_text() == "1"  # watchdog.ps1 holds updates through the hour
+        got, errand_of, errand_in = [], wa.errand_of, wa.errand_in
+
+        async def fake_in(eid, num, msg, name):
+            got.append((eid, msg["text"]["body"]))
+        wa.errand_of, wa.errand_in = (lambda num: "e9" if num == E2 else None), fake_in
+        await wa.handle_incoming({"from": E2, "id": "h1", "type": "text", "text": {"body": "photo bhejta hoon"}})
+        assert got == [] and wa.HELD.exists()
+        wa.in_maintenance = lambda t=None: maint(t) if t else False
+        wa.busy_mark()
+        await wa.release_held()
+        await asyncio.sleep(0.05)
+        assert got == [("e9", "photo bhejta hoon")] and not wa.HELD.exists()
+        wa.errand_of, wa.errand_in = errand_of, errand_in
+        wa.ADMINS.discard(A)
+        wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP = paths
+
         # photo cards: found when missing, one sheet for many, the model's answer parsed, done once
         img = s.p / "files" / "2026-10-24" / "IMG-1.jpg"
         img.parent.mkdir(parents=True, exist_ok=True)
@@ -451,6 +633,7 @@ async def main():
     finally:
         p.stdin.close()
         await p.wait()
+        wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP = paths  # a failed check: the real ones
         for n in (NUM, E3, BOSS):
             shutil.rmtree(wa.PEOPLE / n, ignore_errors=True)
 

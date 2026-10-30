@@ -87,6 +87,11 @@ def deny_writes(path: Path, recursive=True) -> list:
     return [f"Edit({p})"]
 
 
+def deny_reads(path: Path) -> list:
+    """Permission rule blocking Read (and Grep/Glob) under a folder."""
+    return [f"Read(//{Path(path).resolve().as_posix().replace(':', '', 1)}/**)"]
+
+
 ENV = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "MAX_THINKING_TOKENS": "0",
        "BASH_DEFAULT_TIMEOUT_MS": "600000", "BASH_MAX_TIMEOUT_MS": "3600000"}  # video renders can take minutes
 ENV_THINKING = {k: v for k, v in ENV.items() if k != "MAX_THINKING_TOKENS"}  # for brains given an effort level

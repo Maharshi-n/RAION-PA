@@ -328,8 +328,10 @@ async def wa_action(call_id, action, sdp=None):
 
 async def handle_wa_call(call):
     cid, num = call["id"], call.get("from", "")
-    if num not in wa_agent.ALLOWED:  # only the office's own people get the agent
+    if num not in wa_agent.ALLOWED or wa_agent.in_maintenance():  # only the office's own people, never 1-2 AM
         await wa_action(cid, "reject")
+        if num in wa_agent.ALLOWED:
+            await wa_agent.maintenance_note(num)
         return
     await wa_agent.call_started(num)
 
