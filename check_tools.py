@@ -152,9 +152,8 @@ async def main():
 
         # errands: an admin's job done through other people; their messages reach only that errand while it's open,
         # and its worker can only message them, look at their files and ask the admin
-        quiet, turn, final, handle, relay = wa._quiet, wa.errand_turn, wa.errand_final, wa.handle_message, wa.errand_relay
-        wa.ERRANDS, wa.CONTACTS, wa.GATHER, wa._quiet = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp()), 0, \
-            lambda t=None: False
+        turn, final, handle, relay = wa.errand_turn, wa.errand_final, wa.handle_message, wa.errand_relay
+        wa.ERRANDS, wa.CONTACTS, wa.GATHER = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp()), 0
         runs, finals, passed, relayed = [], [], [], []
 
         async def fake_relay(e, note, fallback):  # the locked-down run that writes to the admin, without the model
@@ -264,20 +263,14 @@ async def main():
             await wa.handle_incoming({"from": E1, "id": "v3", "type": "button", "button": {"text": "Dekhiye"}})
             await settle()
             assert wa.SENT[-1]["text"] == "Photo bhejiye" and "held" not in wa._eread(eid)["people"][E1]
-            # follow-ups nobody answered: 3, then only the admin; never at night unless they're chatting
+            # follow-ups nobody answered: 3, then only the admin; night is no different
             ctx.update(replies=0, nudge=True)
             for i in range(wa.MAX_NUDGES):
                 assert not (await call("reply", text=f"yaad {i}")).get("isError")
                 ctx["replies"] = 0  # each one its own run
             assert "haven't answered" in said(await call("reply", text="phir se"))
-            ctx["nudge"], wa._quiet = False, lambda t=None: True
-            e = wa._eread(eid)
-            e["people"][E1]["last_in"] = time.time() - 7200
-            wa._ewrite(e)
-            assert "night" in said(await call("reply", text="x"))
-            wa._quiet = quiet
-            assert "02/01 08:00" in said(await call("wake", at="2099-01-01 23:30", why="check"))  # night: morning
-            wa._quiet = lambda t=None: False
+            ctx["nudge"] = False
+            assert "01/01 23:30" in said(await call("wake", at="2099-01-01 23:30", why="check"))  # night: kept as asked
             wa._jwrite(NUM, "window.json", {"last_in": time.time()})
             # its question goes to the admin through Raion's locked-down relay, and stays open until answered
             await call("ask_admin", text="Vipin sir bus list maang rahe hain. Du?")
@@ -377,7 +370,7 @@ async def main():
             await relay(wa._eread(eid), "A question for them from Divyanshu: number do", "Divyanshu: number do")
             assert wa.SENT[-1] == {"to": NUM, "type": "text", "text": want}, wa.SENT[-1]
         wa.Brain = brain
-        wa._quiet, wa.errand_turn, wa.errand_final, wa.handle_message = quiet, turn, final, handle
+        wa.errand_turn, wa.errand_final, wa.handle_message = turn, final, handle
         wa.errand_relay = relay
 
         # photo cards: found when missing, one sheet for many, the model's answer parsed, done once
