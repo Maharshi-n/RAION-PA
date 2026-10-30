@@ -373,6 +373,57 @@ async def main():
         wa.errand_turn, wa.errand_final, wa.handle_message = turn, final, handle
         wa.errand_relay = relay
 
+        # messages between people who use Raion: now (their Raion is woken), the answer back, later (with their next
+        # message), outside the 24-hour window (the doorbell, then its tap); a turn woken by someone else's message
+        # can't pass anything on or close it, and an item stays until their Raion closes it
+        class Ear:
+            alive = True
+
+            def __init__(self):
+                self.got = []
+
+            async def send(self, t):
+                self.got.append(t)
+
+        async def relay_refused(who, a):
+            try:
+                await wa.relay_tool(who, a)
+            except (ValueError, PermissionError) as e:
+                return str(e)
+            assert False, f"accepted: {a}"
+        r3 = wa.session(E3, "Sharma ji")
+        r3.brain, s.brain, r3.busy, s.busy = Ear(), Ear(), False, False
+        wa._jwrite(E3, "window.json", {"last_in": time.time()})
+        assert f"(+{E3})" in wa.raion_people(NUM) and "number" in await relay_refused(s, {"action": "send",
+                                                                                          "number": E2, "text": "x"})
+        rid = (await wa.relay_tool(s, {"action": "send", "number": E3, "text": "kal 10 baje meeting", "reply": True}))["id"]
+        await asyncio.sleep(0.05)
+        assert "no message from" in r3.brain.got[-1] and "kal 10 baje meeting" in r3.brain.got[-1] and r3.relay_turn
+        assert "own words" in await relay_refused(r3, {"action": "send", "number": NUM, "text": "x"})
+        assert "own words" in await relay_refused(r3, {"action": "done", "id": rid, "text": "haan"})
+        r3.busy = False  # that turn ended; now their own reply
+        await wa.handle_message(r3, "haan aa jaunga", False)
+        assert not r3.relay_turn and "kal 10 baje meeting" in r3.brain.got[-1]  # still in the inbox until closed
+        assert "answer" in await relay_refused(r3, {"action": "done", "id": rid})
+        await wa.relay_tool(r3, {"action": "done", "id": rid, "text": "haan, aa jaunga"})
+        await asyncio.sleep(0.05)
+        assert wa.inbox_text(E3) == "" and "haan, aa jaunga" in s.brain.got[-1] and "kal 10 baje" in s.brain.got[-1]
+        assert s.relay_turn  # the answer woke the sender's Raion: it tells them, then they speak again
+        s.busy = r3.busy = False
+        await wa.handle_message(s, "Sharma ji ko fees list ke liye bolna", False)
+        n = len(r3.brain.got)
+        await wa.relay_tool(s, {"action": "send", "number": E3, "text": "fees list bhejna", "now": False})
+        wa._jwrite(E3, "window.json", {"last_in": 0})
+        await wa.relay_tool(s, {"action": "send", "number": E3, "text": "urgent baat"})
+        await asyncio.sleep(0.05)
+        assert len(r3.brain.got) == n and wa.SENT[-1]["type"] == "template"  # nothing woken: the doorbell rang
+        await wa.handle_incoming({"from": E3, "id": "rb1", "type": "button", "button": {"text": "Dekhiye"}})
+        await asyncio.sleep(0.05)
+        assert "fees list bhejna" in r3.brain.got[-1] and "urgent baat" in r3.brain.got[-1]
+        assert "waiting for them" in str((await wa.relay_tool(s, {"action": "list"}))["sent"])
+        s.brain = r3.brain = None
+        s.busy = r3.busy = s.relay_turn = r3.relay_turn = False
+
         # photo cards: found when missing, one sheet for many, the model's answer parsed, done once
         img = s.p / "files" / "2026-10-24" / "IMG-1.jpg"
         img.parent.mkdir(parents=True, exist_ok=True)
