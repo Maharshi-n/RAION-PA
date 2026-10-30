@@ -393,24 +393,35 @@ async def main():
             assert False, f"accepted: {a}"
         r3 = wa.session(E3, "Sharma ji")
         r3.brain, s.brain, r3.busy, s.busy = Ear(), Ear(), False, False
-        wa._jwrite(E3, "window.json", {"last_in": time.time()})
+        for n in (E3, NUM):
+            wa._jwrite(n, "window.json", {"last_in": time.time()})
         assert f"(+{E3})" in wa.raion_people(NUM) and "number" in await relay_refused(s, {"action": "send",
                                                                                           "number": E2, "text": "x"})
+        wa.ADMINS.add(NUM)  # an admin's message wakes their Raion, which can then only tell them
         rid = (await wa.relay_tool(s, {"action": "send", "number": E3, "text": "kal 10 baje meeting", "reply": True}))["id"]
         await asyncio.sleep(0.05)
         assert "no message from" in r3.brain.got[-1] and "kal 10 baje meeting" in r3.brain.got[-1] and r3.relay_turn
         assert "own words" in await relay_refused(r3, {"action": "send", "number": NUM, "text": "x"})
         assert "own words" in await relay_refused(r3, {"action": "done", "id": rid, "text": "haan"})
+        try:
+            await wa.run_tool(r3, "download", {"url": "http://x"})
+            assert False, "a woken turn downloaded"
+        except PermissionError:
+            pass
         r3.busy = False  # that turn ended; now their own reply
         await wa.handle_message(r3, "haan aa jaunga", False)
         assert not r3.relay_turn and "kal 10 baje meeting" in r3.brain.got[-1]  # still in the inbox until closed
         assert "answer" in await relay_refused(r3, {"action": "done", "id": rid})
+        assert "own folder" in await relay_refused(r3, {"action": "done", "id": rid, "text": "ye lo",
+                                                         "files": ["global/INSTITUTE.md"]})
+        assert "kal 10 baje" in wa.inbox_text(E3)  # a refused answer leaves it open
+        # a staff member's answer reaches the admin word for word: no model in between, nothing woken
         await wa.relay_tool(r3, {"action": "done", "id": rid, "text": "haan, aa jaunga"})
         await asyncio.sleep(0.05)
-        assert wa.inbox_text(E3) == "" and "haan, aa jaunga" in s.brain.got[-1] and "kal 10 baje" in s.brain.got[-1]
-        assert s.relay_turn  # the answer woke the sender's Raion: it tells them, then they speak again
+        assert wa.inbox_text(E3) == "" and s.brain.got == [] and wa.SENT[-1]["to"] == NUM
+        assert wa.SENT[-1]["text"].startswith("📨 *") and "haan, aa jaunga" in wa.SENT[-1]["text"]
+        assert "kal 10 baje" in wa.SENT[-1]["text"] and "word for word" in wa.inbox_text(NUM)
         s.busy = r3.busy = False
-        await wa.handle_message(s, "Sharma ji ko fees list ke liye bolna", False)
         n = len(r3.brain.got)
         await wa.relay_tool(s, {"action": "send", "number": E3, "text": "fees list bhejna", "now": False})
         wa._jwrite(E3, "window.json", {"last_in": 0})
@@ -421,6 +432,7 @@ async def main():
         await asyncio.sleep(0.05)
         assert "fees list bhejna" in r3.brain.got[-1] and "urgent baat" in r3.brain.got[-1]
         assert "waiting for them" in str((await wa.relay_tool(s, {"action": "list"}))["sent"])
+        wa.ADMINS.discard(NUM)
         s.brain = r3.brain = None
         s.busy = r3.busy = s.relay_turn = r3.relay_turn = False
 
