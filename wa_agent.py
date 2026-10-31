@@ -1,9 +1,11 @@
 """WhatsApp message agent: per-number tray, voice notes, one Claude session per number (fresh after idle) that works
 like Claude Code (files, Bash, PowerShell, web) plus Raion's own tools over MCP (send, build, fill, download, print),
 memory (global + per person) kept by a background memory keeper. Messages sent while it works reach it mid-task."""
-import asyncio, base64, collections, hashlib, io, ipaddress, json, mimetypes, os, re, secrets, shutil, sys, time
+import asyncio, base64, collections, hashlib, io, ipaddress, json, mimetypes, os, re, secrets, shutil, socket, sys, time
 import urllib.parse, wave, zipfile
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, time as dtime, timedelta
+from decimal import Decimal
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -23,6 +25,8 @@ PEOPLE = MEM / "people"
 ADMIN_MEM = MEM / "admin"  # admins only: their own timeline and topics (money, staff matters, errands, personal)
 RUNTIME = ROOT / ".runtime"
 BACKUPS = ROOT / "backups"
+TALLY = RUNTIME / "tally.json"  # Tally's gate (RaionGate/gate.ps1 on the accountant's PC): its code, where it was found
+TALLY_MAP = ADMIN_MEM / "topics" / "Tally map.md"  # Raion's notes of where things are in Tally (never amounts)
 
 
 def _nums(key):
@@ -40,7 +44,7 @@ MEMORY_CHARS = 8000  # old layout (until the one-time move): how much of MEMORY.
 MEMORY_LIMIT = {True: 4000, False: 2500}  # new layout: MEMORY.md of an admin / a staff member (kept under it)
 PROFILE_LIMIT, TODO_SHOWN, DOUBTS_SHOWN = 1000, 20, 5
 EVENTS_CHARS, TOPICS_CHARS = 3000, 1500  # timeline and topic names a chat starts with
-MEMORY_MOVE = False  # the one-time move to the new layout: False = the night only writes memory/MIGRATION_PLAN.md
+MEMORY_MOVE = True  # the one-time move to the new layout: False = the night only writes memory/MIGRATION_PLAN.md
 MAINT_FROM, MAINT_TO = 1, 2  # 01:00-02:00 every night: maintenance (chats off, backup, tidy); nothing runs then
 JOB_MODEL = os.environ.get("JOB_MODEL") or "sonnet"  # scheduled jobs (daily summaries, site checks)
 JOB_EFFORT = "medium"  # their thinking (JOB_EFFORT in .env is ignored)
@@ -1501,6 +1505,23 @@ TOOLS = [
            "reply": {**B, "description": "send: true when an answer, a file or a confirmation should come back"},
            "id": {**S, "description": "done: the inbox item"}},
           ["action"]),
+    _tool("tally", "Read the office's Tally (the accounts, on the accountant's PC), live. Read-only: it can't add or "
+          "change anything in Tally; entering or correcting entries is the accountant's job, say so. connect: once, "
+          "with the code shown on the accountant's PC after RaionGate's setup (a password: never repeat or note it; "
+          "host: that PC's IP, only if it isn't found by itself). status, companies, ledgers (closing balances; under: "
+          "a group with its subgroups; name: part of a ledger's name; to: as of that date), groups, vouchertypes, "
+          "vouchers (entries from..to, up to a year; ledger and/or type: part of the name, to filter). Money figures "
+          "only from a fresh read, said with its as_of time: never from memory or an earlier chat. Your map of where "
+          f"things are in Tally: {TALLY_MAP}. Read it first; when you find something it lacks, add it: names of "
+          "ledgers, groups and voucher types, which institute or purpose uses which, how each kind of entry is made, "
+          "never amounts. Build or check the map only after office hours (big reads slow the accountant's Tally), in "
+          "small steps. Tally answers only while that PC is on with Tally open, and shows only the companies loaded in "
+          "it: for another one, the accountant has to load it too (F3).",
+          {"action": {"enum": ["connect", "status", "companies", "ledgers", "groups", "vouchertypes", "vouchers"]},
+           "company": {**S, "description": "as Tally names it (see companies); empty = the current one"},
+           "from": {**S, "description": "YYYY-MM-DD"}, "to": {**S, "description": "YYYY-MM-DD"},
+           "under": S, "name": S, "ledger": S, "type": S, "code": S, "host": S},
+          ["action"], admin=True),
 ]
 BUILD_TOOLS = ("make_pdf", "make_image", "make_office", "fill_xlsx", "fill_docx")
 JOB_TOOLS = BUILD_TOOLS + ("schedule",)  # all an automation run gets (schedule: only adding one follow-up)
@@ -1707,7 +1728,257 @@ async def run_tool(s: Session, op: str, a: dict) -> tuple[dict, list]:
         return await errand_tool(s, a), []
     if op == "relay":
         return await relay_tool(s, a), []
+    if op == "tally":
+        if not s.admin:
+            raise PermissionError("Tally is only for admins")
+        return await tally_tool(s, a), []
     raise ValueError(f"unknown tool '{op}'")
+
+
+# ---------------- Tally: read-only, through RaionGate on the accountant's PC (RaionGate/gate.ps1) ----------------
+# The gate is the lock: it knows only fixed reads and writes each Tally request itself. Here: find it on the LAN, ask,
+# and turn Tally's XML into short answers (all rows in an Excel file when there are many).
+GATE_PORT = 9100
+TALLY_ROWS = 40  # rows in the answer itself
+TALLY_LOCK = asyncio.Lock()  # one read at a time: the gate answers one by one
+BAD_XML = set(range(32)) - {9, 10, 13}  # character references Tally sends (&#4;) that XML doesn't allow
+
+
+def _gate_code(c) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(c or "")).upper()
+
+
+def _lan_hosts() -> list:
+    """Every address of this PC's LAN, where the accountant's PC can be."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
+        u.connect(("10.255.255.255", 1))  # picks the LAN's interface; sends nothing
+        me = u.getsockname()[0]
+    # ponytail: a /24 only; on a bigger LAN connect with host
+    return [str(h) for h in ipaddress.ip_network(f"{me}/24", strict=False).hosts()]
+
+
+async def _hello(http, host: str) -> str:
+    """'RaionGate <id>' from a gate at host (the id comes from its code), else ''."""
+    try:
+        async with http.get(f"http://{host}:{GATE_PORT}/hello", timeout=aiohttp.ClientTimeout(total=1.5)) as r:
+            return (await r.text()).strip()[:40]
+    except Exception:
+        return ""
+
+
+async def _find_gate(http, cfg: dict) -> str:
+    """Where the gate is: the address it was last found at, else a look around the LAN (its address can change)."""
+    want = "RaionGate " + hashlib.sha256(cfg["code"].encode()).hexdigest()[:12]
+    if cfg.get("host") and await _hello(http, cfg["host"]) == want:
+        return cfg["host"]
+    sem = asyncio.Semaphore(64)
+
+    async def probe(h):
+        async with sem:
+            return h, await _hello(http, h)
+    gates = [(h, hi) for h, hi in await asyncio.gather(*map(probe, await asyncio.to_thread(_lan_hosts)))
+             if hi.startswith("RaionGate ")]
+    found = next((h for h, hi in gates if hi == want), None)
+    if not found and gates:
+        raise PermissionError(f"the gate at {gates[0][0]} has a different code (set up again?): connect again with "
+                              "the code shown on the accountant's PC")
+    if not found:
+        raise ConnectionError("Tally can't be reached: the accountant's PC is off or not on the network, or RaionGate "
+                              "isn't set up there. Ask again once it's on.")
+    TALLY.write_text(json.dumps({**cfg, "host": found}), encoding="utf-8")
+    return found
+
+
+def tally_xml(body: bytes) -> ET.Element:
+    """Tally's answer as XML, without the control characters it sends that XML doesn't allow; its errors raised."""
+    utf16 = body[:2] in (b"\xff\xfe", b"\xfe\xff") or body[1:2] == b"\x00"
+    t = body.decode("utf-16" if utf16 else "utf-8-sig", "replace")
+    t = re.sub(r"&#([xX][0-9a-fA-F]+|\d+);", lambda m: "" if (int(m[1][1:], 16) if m[1][0] in "xX" else int(m[1]))
+               in BAD_XML else m[0], t)
+    t = re.sub(r"^\s*<\?xml[^>]*\?>", "", re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", t))
+    if "<!DOCTYPE" in t.upper() or "<!ENTITY" in t.upper():  # Tally never sends these; entity tricks stop here
+        raise ValueError("Tally's answer had a DTD: not read")
+    root = ET.fromstring(t)
+    if err := root.findtext(".//LINEERROR") or (root.text if root.tag == "RESPONSE" else None):
+        raise ValueError(f"Tally: {err.strip()}")
+    return root
+
+
+async def gate_read(read: str, **q) -> ET.Element:
+    """One read through the gate."""
+    cfg = json.loads(TALLY.read_text(encoding="utf-8")) if TALLY.exists() else {}
+    if not cfg.get("code"):
+        raise ValueError("Tally isn't connected yet: it needs the code shown on the accountant's PC after RaionGate's "
+                         "setup (action connect)")
+    async with TALLY_LOCK, aiohttp.ClientSession() as http:
+        host = await _find_gate(http, cfg)
+        async with http.post(f"http://{host}:{GATE_PORT}/read", json={"read": read, **{k: v for k, v in q.items() if v}},
+                             headers={"X-Gate-Code": cfg["code"]}, timeout=aiohttp.ClientTimeout(total=150)) as r:
+            body = await r.read()
+            if r.status == 403:
+                raise PermissionError("the gate refused the code: connect again with the code shown on the "
+                                      "accountant's PC")
+            if r.status != 200:
+                raise ValueError(f"Tally: {body.decode('utf-8', 'replace')[:300]}")
+    return tally_xml(body)
+
+
+def _amt(s) -> Decimal:
+    """Tally's amount -> Decimal with Tally's own sign: debit negative (-500.00 is 500 Dr)."""
+    t = str(s or "").replace(",", "").strip()
+    m = re.search(r"-?\d+(?:\.\d+)?", t)
+    return Decimal(m[0]) * (-1 if t.endswith("Dr") else 1) if m else Decimal(0)
+
+
+def inr(x: Decimal) -> str:
+    whole, frac = f"{abs(x):.2f}".split(".")
+    head = re.sub(r"(\d)(?=(\d\d)+$)", r"\1,", whole[:-3])
+    return f"₹{head + ',' if head else ''}{whole[-3:]}.{frac}"
+
+
+def bal(x: Decimal) -> str:
+    return f"{inr(x)} {'Dr' if x < 0 else 'Cr'}" if x else "₹0.00"
+
+
+def _tdate(s) -> str:
+    s = str(s or "").strip()
+    for f in ("%Y%m%d", "%d-%b-%Y", "%d-%b-%y"):
+        try:
+            return datetime.strptime(s, f).strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+    return s
+
+
+def _masters(root, tag) -> list[dict]:
+    return [{"name": (e.get("NAME") or e.findtext("NAME") or "").strip(),
+             "parent": (e.findtext("PARENT") or "").strip() or "Primary",
+             "closing": _amt(e.findtext("CLOSINGBALANCE"))} for e in root.iter(tag)]
+
+
+def _below(groups: list, top: str) -> set:
+    """The group named top and every group under it, lower-cased."""
+    kids = collections.defaultdict(list)
+    for g in groups:
+        kids[g["parent"].lower()].append(g["name"].lower())
+    seen, todo = set(), [top] if any(g["name"].lower() == top for g in groups) else []
+    while todo:
+        if (n := todo.pop()) not in seen:
+            seen.add(n)
+            todo += kids[n]
+    return seen
+
+
+def _vouchers(root) -> list[dict]:
+    """Vouchers of a Day Book read: each with its ledger lines (name, amount: debit negative)."""
+    out = []
+    for v in root.iter("VOUCHER"):
+        lines = [e for e in v if e.tag == "ALLLEDGERENTRIES.LIST"] or [
+            e for e in v.iter() if e.tag in ("LEDGERENTRIES.LIST", "ACCOUNTINGALLOCATIONS.LIST")]
+        out.append({"date": _tdate(v.findtext("DATE")), "type": v.findtext("VOUCHERTYPENAME") or v.get("VCHTYPE") or "",
+                    "no": v.findtext("VOUCHERNUMBER") or "", "party": v.findtext("PARTYLEDGERNAME") or "",
+                    "narration": " ".join((v.findtext("NARRATION") or "").split()),
+                    "cancelled": "Yes" in (v.findtext("ISCANCELLED"), v.findtext("ISOPTIONAL")),
+                    "lines": [((e.findtext("LEDGERNAME") or "").strip(), _amt(e.findtext("AMOUNT"))) for e in lines]})
+    return out
+
+
+async def _tally_answer(s: Session, what: str, head: list, rows: list, res: dict, sheet: list = None) -> dict:
+    """The first rows as text lines; all of them (or the given sheet, header first) in an Excel file when there are
+    more. Amounts become two number columns there, Dr and Cr."""
+    res["count"] = len(rows)
+    res["rows"] = [" · ".join(bal(c) if isinstance(c, Decimal) else str(c) for c in r if c not in ("", None))
+                   for r in rows[:TALLY_ROWS]]
+    if len(rows) > TALLY_ROWS:
+        head, *body = sheet or [head, *rows]
+        amounts = [bool(body) and isinstance(body[0][i], Decimal) for i in range(len(head))]
+        xl = [[x for h, a in zip(head, amounts) for x in ([f"{h} Dr", f"{h} Cr"] if a else [h])]]
+        xl += [[x for c in r for x in ([float(-c) if c < 0 else None, float(c) if c > 0 else None]
+                                       if isinstance(c, Decimal) else [c])] for r in body]
+        out = s.p / "outbox" / f"Tally {what} {date.today():%d-%m-%Y}.xlsx"
+        await docs.run(docs.make_xlsx, {"sheets": [{"name": what, "rows": xl}]}, out)
+        res["file"], res["note"] = out.relative_to(s.p).as_posix(), f"first {TALLY_ROWS} of {len(rows)} shown, all in the file"
+    return res
+
+
+async def tally_tool(s: Session, a: dict) -> dict:
+    act = str(a.get("action") or "").lower()
+    if act == "connect":
+        code, host = _gate_code(a.get("code")), str(a.get("host") or "").strip()
+        if len(code) != 16:
+            raise ValueError("the code is the 16 letters and digits shown on the accountant's PC (like ABCD-EFGH-JK23-"
+                             "4567)")
+        if host:
+            ipaddress.ip_address(host)
+        RUNTIME.mkdir(exist_ok=True)
+        TALLY.write_text(json.dumps({"code": code, "host": host}), encoding="utf-8")
+        act = "status"
+
+    def day(k):
+        return datetime.strptime(str(a[k]).strip(), "%Y-%m-%d").date() if a.get(k) else None
+    company, res = str(a.get("company") or "").strip(), {"as_of": datetime.now().strftime("%d/%m/%Y %H:%M")}
+    if act in ("status", "companies"):
+        rows = [[c.get("NAME") or c.findtext("NAME") or "", "year from " + _tdate(c.findtext("STARTINGFROM")),
+                 "books from " + _tdate(c.findtext("BOOKSFROM"))] for c in (await gate_read("companies")).iter("COMPANY")]
+        res = {"connected": True, **res, **({} if rows else {"note": "no company is open in Tally right now"})}
+        return await _tally_answer(s, "companies", ["Company", "Year", "Books"], rows, res)
+    if act in ("ledgers", "groups"):
+        q = {"company": company, "to": f"{day('to'):%Y%m%d}" if a.get("to") else ""}
+        under, name = str(a.get("under") or "").strip().lower(), str(a.get("name") or "").strip().lower()
+        groups = _masters(await gate_read("groups", **q), "GROUP") if act == "groups" or under else []
+        if act == "groups":
+            return await _tally_answer(s, "groups", ["Group", "Under", "Closing"], [[g["name"], "under " + g["parent"],
+                                                                                     g["closing"]] for g in groups], res,
+                                       [["Group", "Under", "Closing"], *[[g["name"], g["parent"], g["closing"]]
+                                                                         for g in groups]])
+        ledgers = _masters(await gate_read("ledgers", **q), "LEDGER")
+        if under:
+            if not (keep := _below(groups, under)):
+                raise ValueError(f"Tally has no group named '{a['under']}' (see groups)")
+            ledgers = [x for x in ledgers if x["parent"].lower() in keep]
+        if name:
+            ledgers = [x for x in ledgers if name in x["name"].lower()]
+        if under or name:
+            res["total"] = bal(sum((x["closing"] for x in ledgers), Decimal(0)))
+        return await _tally_answer(s, "ledgers", [], [[x["name"], "under " + x["parent"], x["closing"]] for x in ledgers],
+                                   res, [["Ledger", "Under", "Closing"], *[[x["name"], x["parent"], x["closing"]]
+                                                                         for x in ledgers]])
+    if act == "vouchertypes":
+        types = _masters(await gate_read("vouchertypes", company=company), "VOUCHERTYPE")
+        return await _tally_answer(s, "voucher types", ["Voucher type", "Under"],
+                                   [[x["name"], x["parent"]] for x in types], res)
+    if act != "vouchers":
+        raise ValueError(f"unknown action '{act}'")
+    start = day("from") or date.today()
+    end = day("to") or start
+    if end < start or (end - start).days > 365:
+        raise ValueError("vouchers: from..to, at most a year")
+    found, d = [], start
+    while d <= end:  # the gate takes a month at most per read: short pauses for the accountant's Tally
+        e = min(d + timedelta(days=30), end)
+        found += _vouchers(await gate_read("vouchers", company=company, **{"from": f"{d:%Y%m%d}", "to": f"{e:%Y%m%d}"}))
+        d = e + timedelta(days=1)
+    led, typ = str(a.get("ledger") or "").strip().lower(), str(a.get("type") or "").strip().lower()
+    cancelled = sum(v["cancelled"] for v in found)
+    found = [v for v in found if not v["cancelled"] and typ in v["type"].lower()
+             and (not led or any(led in n.lower() for n, _ in v["lines"]))]
+    rows, sheet, matched, dr, cr = [], [["Date", "Type", "No", "Party", "Narration", "Ledger", "Amount"]], set(), 0, 0
+    for v in found:
+        mine = [(n, x) for n, x in v["lines"] if led and led in n.lower()]
+        matched.update(n for n, _ in mine)
+        net = sum((x for _, x in mine), Decimal(0))
+        dr, cr = dr - sum(x for _, x in mine if x < 0), cr + sum(x for _, x in mine if x > 0)
+        total = sum((-x for _, x in v["lines"] if x < 0), Decimal(0))
+        rows.append([v["date"], f"{v['type']} {v['no']}".strip(), v["party"], net if led else inr(total),
+                     v["narration"][:80]])
+        sheet += [[v["date"], v["type"], v["no"], v["party"], v["narration"], n, x] for n, x in v["lines"]]
+    res.update({"from": f"{start:%d/%m/%Y}", "to": f"{end:%d/%m/%Y}"})
+    if led:
+        res.update({"matched_ledgers": sorted(matched), "debit": inr(Decimal(dr)), "credit": inr(Decimal(cr)),
+                    "net": bal(Decimal(cr) - Decimal(dr))})
+    if cancelled:
+        res["left_out"] = f"{cancelled} cancelled or optional vouchers"
+    return await _tally_answer(s, "vouchers", [], rows, res, sheet)
 
 
 # the local endpoint behind every chat's raion_mcp.py: 127.0.0.1 on a random port, so never on the tunnel

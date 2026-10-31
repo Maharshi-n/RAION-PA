@@ -32,7 +32,7 @@ async def main():
     try:
         assert (await rpc(1, "initialize", {"protocolVersion": "2025-06-18"}))["serverInfo"]["name"] == "raion"
         names = [t["name"] for t in (await rpc(2, "tools/list"))["tools"]]
-        assert "send_message" in names and "print" not in names, names  # print is admin-only
+        assert "send_message" in names and "print" not in names and "tally" not in names, names  # admin-only
         r = await rpc(3, "tools/call", {"name": "make_pdf", "arguments": {"html": "work/t.html", "name": "t"}})
         assert json.loads(r["content"][0]["text"])["unfilled"] == ["[DATE]"]
         assert r["content"][1]["type"] == "image"  # the model sees its own preview
@@ -566,8 +566,15 @@ async def main():
         assert len(ran) == (3 if sunday else 1)  # once a night
         wa.NIGHT_STAMP.unlink()
         (wa.MEM / ".memory_v2").unlink()  # before the move, a night only writes the plan
+        move, wa.MEMORY_MOVE = wa.MEMORY_MOVE, False
         await wa.nightly(until)
         assert not wa.v2() and "plan in MIGRATION_PLAN.md" in (wa.MEM / "CHANGELOG.md").read_text(encoding="utf-8")
+        wa.NIGHT_STAMP.unlink()
+        wa.MEMORY_MOVE, ran = True, []  # the move night: the new layout starts, everyone near a limit is tidied
+        await wa.nightly(until)
+        assert wa.v2() and "one-time move done" in (wa.MEM / "CHANGELOG.md").read_text(encoding="utf-8")
+        assert ran == [S, A, "timeline"], ran
+        wa.MEMORY_MOVE = move
         wa.cleanup, wa.cleanup_events, wa.backup_memory = cleanup, events, backup
         runs = []
 
@@ -629,6 +636,95 @@ async def main():
             == {1: "Kind: newspaper cutting"}
         wa.card_of(img).write_text("Kind: other\n", encoding="utf-8")
         assert img not in wa._card_todo(10**6)
+
+        # Tally: admins only, through the gate (found on the LAN by its code), a month per read at most, Tally's XML
+        # (with its stray &#4;) into short answers, its errors passed on
+        assert next(t for t in wa.TOOLS if t["name"] == "tally")["admin"] and "tally" not in wa.JOB_TOOLS
+        tally, gate_port, lan, reads, code = wa.TALLY, wa.GATE_PORT, wa._lan_hosts, [], "K7M2Q9XWTPAB3CDE"
+        wa.TALLY = Path(tempfile.mkdtemp()) / "tally.json"
+
+        def coll(tag, rows):
+            return "<ENVELOPE><BODY><DATA><COLLECTION>" + "".join(
+                f'<{tag} NAME="{n}"><PARENT>{p}</PARENT><CLOSINGBALANCE>{b}</CLOSINGBALANCE></{tag}>'
+                for n, p, b in rows) + "</COLLECTION></DATA></BODY></ENVELOPE>"
+
+        def vch(day, party, narr, lines, cancelled="No"):
+            return (f'<TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="Receipt"><DATE>{day}</DATE><NARRATION>{narr}'
+                    f"</NARRATION><VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME><VOUCHERNUMBER>1</VOUCHERNUMBER>"
+                    f"<PARTYLEDGERNAME>{party}</PARTYLEDGERNAME><ISCANCELLED>{cancelled}</ISCANCELLED>" + "".join(
+                        f"<ALLLEDGERENTRIES.LIST><LEDGERNAME>{n}</LEDGERNAME><AMOUNT>{a}</AMOUNT></ALLLEDGERENTRIES.LIST>"
+                        for n, a in lines) + "</VOUCHER></TALLYMESSAGE>")
+        answers = {"companies": '<ENVELOPE><BODY><DATA><COLLECTION><COMPANY NAME="MNG 2026-27"><STARTINGFROM>20260401'
+                                "</STARTINGFROM></COMPANY></COLLECTION></DATA></BODY></ENVELOPE>",
+                   "groups": coll("GROUP", [("Current Assets", "", "-60000.00"), ("Sundry Debtors", "Current Assets",
+                                                                                  "-60000.00"),
+                                            ("MNDC Students", "Sundry Debtors", "-58000.00")]),
+                   "ledgers": coll("LEDGER", [("Old Debtor", "Sundry Debtors", "-2000.00"),
+                                              ("B.Ed Fees", "Fees Income", "20000.00")]
+                                   + [(f"Student {i}", "MNDC Students", "-1000.00") for i in range(45)])}
+
+        async def gate(req):
+            if req.path == "/hello":
+                return wa.web.Response(text="RaionGate " + wa.hashlib.sha256(code.encode()).hexdigest()[:12])
+            if req.headers.get("X-Gate-Code") != code:
+                return wa.web.Response(status=403, text="wrong code")
+            reads.append(q := await req.json())
+            if q.get("company") == "Wrong":
+                return wa.web.Response(text="<ENVELOPE><BODY><DATA><LINEERROR>Could not set 'SVCurrentCompany' to "
+                                            "'Wrong'</LINEERROR></DATA></BODY></ENVELOPE>")
+            if q.get("company") == "Closed":
+                return wa.web.Response(status=503, text="Tally is not open")
+            if q["read"] == "vouchers":
+                return wa.web.Response(text="<ENVELOPE><BODY><IMPORTDATA><REQUESTDATA>" + vch(
+                    q["from"], "Ramesh", "B.Ed fees&#4;", [("Cash", "-5000.00"), ("B.Ed Fees", "5000.00")]) + vch(
+                    q["to"], "X", "cancelled", [("Cash", "-1.00"), ("B.Ed Fees", "1.00")], "Yes")
+                    + "</REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>")
+            return wa.web.Response(text=answers[q["read"]])
+        gapp = wa.web.Application()
+        gapp.add_routes([wa.web.get("/hello", gate), wa.web.post("/read", gate)])
+        runner, down = wa.web.AppRunner(gapp, access_log=None), False
+        await runner.setup()
+        await wa.web.TCPSite(runner, "127.0.0.1", 0).start()
+        wa.GATE_PORT, wa._lan_hosts = runner.addresses[0][1], lambda: ["127.0.0.1"]
+
+        async def fails(a, kind, words=""):
+            try:
+                await wa.run_tool(s, "tally", a)
+            except kind as e:
+                assert words in str(e), e
+                return
+            raise AssertionError(f"{a} should fail")
+        try:
+            s.admin = False
+            await fails({"action": "status"}, PermissionError)  # staff never reach Tally
+            s.admin = True
+            await fails({"action": "status"}, ValueError, "isn't connected")
+            await fails({"action": "connect", "code": "K7M2Q9XWTP"}, ValueError, "16 letters")
+            r, _ = await wa.run_tool(s, "tally", {"action": "connect", "code": "k7m2-q9xw-tpab-3cde"})
+            assert r["connected"] and r["rows"][0].startswith("MNG 2026-27 · year from 01/04/2026"), r
+            assert json.loads(wa.TALLY.read_text(encoding="utf-8"))["host"] == "127.0.0.1"
+            r, _ = await wa.run_tool(s, "tally", {"action": "ledgers", "under": "sundry debtors"})  # with its subgroups
+            assert r["count"] == 46 and r["total"] == "₹47,000.00 Dr" and len(r["rows"]) == wa.TALLY_ROWS, r
+            assert (s.p / r["file"]).exists()  # every row is in the Excel file
+            reads.clear()
+            r, _ = await wa.run_tool(s, "tally", {"action": "vouchers", "from": "2026-07-01", "to": "2026-09-15",
+                                                  "ledger": "b.ed"})
+            assert [(q["from"], q["to"]) for q in reads] == [("20260701", "20260731"), ("20260801", "20260831"),
+                                                             ("20260901", "20260915")], reads
+            assert r["count"] == 3 and r["net"] == "₹15,000.00 Cr" and r["left_out"].startswith("3 "), r
+            assert r["rows"][0] == "01/07/2026 · Receipt 1 · Ramesh · ₹5,000.00 Cr · B.Ed fees", r["rows"]
+            await fails({"action": "ledgers", "company": "Wrong"}, ValueError, "Could not set")
+            await fails({"action": "ledgers", "company": "Closed"}, ValueError, "not open")
+            await fails({"action": "ledgers", "under": "Nope"}, ValueError, "no group")
+            wa.TALLY.write_text(json.dumps({"code": "AAAAAAAAAAAAAAAA", "host": "127.0.0.1"}), encoding="utf-8")
+            await fails({"action": "status"}, PermissionError, "different code")  # the gate was set up again
+            await runner.cleanup()
+            down = True
+            await fails({"action": "status"}, ConnectionError, "can't be reached")  # the accountant's PC is off
+        finally:
+            if not down:
+                await runner.cleanup()
+            wa.TALLY, wa.GATE_PORT, wa._lan_hosts = tally, gate_port, lan
         print("ok")
     finally:
         p.stdin.close()

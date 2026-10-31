@@ -59,3 +59,6 @@ You set it up once, then the watchdog keeps it running and pulls Maharshi's code
   Raion backs up memory\ and tidies it. memory\CHANGELOG.md lists what each night did.
 - memory\MIGRATION_PLAN.md: the plan of the one-time memory move (written the first night after the update). Nothing
   changes until Maharshi approves it from his laptop.
+- Tally: admins' Raion reads it (never writes) through RaionGate on the accountant's PC. RaionGate\ is for that PC
+  only: there, setup.bat (double-click, Yes) installs it and shows a code for Raion; remove.bat undoes it. Nothing of
+  it runs on this PC. Raion keeps the code and the gate's address in .runtime\tally.json.
