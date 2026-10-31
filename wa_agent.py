@@ -1796,6 +1796,7 @@ def tally_xml(body: bytes) -> ET.Element:
     t = re.sub(r"&#([xX][0-9a-fA-F]+|\d+);", lambda m: "" if (int(m[1][1:], 16) if m[1][0] in "xX" else int(m[1]))
                in BAD_XML else m[0], t)
     t = re.sub(r"^\s*<\?xml[^>]*\?>", "", re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", t))
+    t = re.sub(r"<(/?)([A-Za-z_][\w.-]*):", r"<\1\2_", t)  # <UDF:X> comes without its xmlns outside the Day Book
     if "<!DOCTYPE" in t.upper() or "<!ENTITY" in t.upper():  # Tally never sends these; entity tricks stop here
         raise ValueError("Tally's answer had a DTD: not read")
     root = ET.fromstring(t)
@@ -1813,7 +1814,7 @@ async def gate_read(read: str, **q) -> ET.Element:
     async with TALLY_LOCK, aiohttp.ClientSession() as http:
         host = await _find_gate(http, cfg)
         async with http.post(f"http://{host}:{GATE_PORT}/read", json={"read": read, **{k: v for k, v in q.items() if v}},
-                             headers={"X-Gate-Code": cfg["code"]}, timeout=aiohttp.ClientTimeout(total=150)) as r:
+                             headers={"X-Gate-Code": cfg["code"]}, timeout=aiohttp.ClientTimeout(total=300)) as r:
             body = await r.read()
             if r.status == 403:
                 raise PermissionError("the gate refused the code: connect again with the code shown on the "
@@ -1923,7 +1924,8 @@ async def tally_tool(s: Session, a: dict) -> dict:
         res = {"connected": True, **res, **({} if rows else {"note": "no company is open in Tally right now"})}
         return await _tally_answer(s, "companies", ["Company", "Year", "Books"], rows, res)
     if act in ("ledgers", "groups"):
-        q = {"company": company, "to": f"{day('to'):%Y%m%d}" if a.get("to") else ""}
+        on = day("to") or date.today()  # always a date: without one Tally gives balances on its own date
+        q, res["balances_on"] = {"company": company, "to": f"{on:%Y%m%d}"}, f"{on:%d/%m/%Y}"
         under, name = str(a.get("under") or "").strip().lower(), str(a.get("name") or "").strip().lower()
         groups = _masters(await gate_read("groups", **q), "GROUP") if act == "groups" or under else []
         if act == "groups":
@@ -1959,6 +1961,11 @@ async def tally_tool(s: Session, a: dict) -> dict:
         found += _vouchers(await gate_read("vouchers", company=company, **{"from": f"{d:%Y%m%d}", "to": f"{e:%Y%m%d}"}))
         d = e + timedelta(days=1)
     led, typ = str(a.get("ledger") or "").strip().lower(), str(a.get("type") or "").strip().lower()
+    asked = {f"{start + timedelta(days=i):%d/%m/%Y}" for i in range((end - start).days + 1)}
+    if other := sorted({v["date"] for v in found} - asked):  # Tally didn't take the dates: never pass these off
+        res["not_shown"] = (f"Tally sent entries of other days ({', '.join(other[:5])}), left out: the dates didn't "
+                            "reach Tally, tell Maharshi")
+        found = [v for v in found if v["date"] in asked]
     cancelled = sum(v["cancelled"] for v in found)
     found = [v for v in found if not v["cancelled"] and typ in v["type"].lower()
              and (not led or any(led in n.lower() for n, _ in v["lines"]))]

@@ -655,7 +655,7 @@ async def main():
                         f"<ALLLEDGERENTRIES.LIST><LEDGERNAME>{n}</LEDGERNAME><AMOUNT>{a}</AMOUNT></ALLLEDGERENTRIES.LIST>"
                         for n, a in lines) + "</VOUCHER></TALLYMESSAGE>")
         answers = {"companies": '<ENVELOPE><BODY><DATA><COLLECTION><COMPANY NAME="MNG 2026-27"><STARTINGFROM>20260401'
-                                "</STARTINGFROM></COMPANY></COLLECTION></DATA></BODY></ENVELOPE>",
+                                "</STARTINGFROM><UDF:X.LIST>1</UDF:X.LIST></COMPANY></COLLECTION></DATA></BODY></ENVELOPE>",
                    "groups": coll("GROUP", [("Current Assets", "", "-60000.00"), ("Sundry Debtors", "Current Assets",
                                                                                   "-60000.00"),
                                             ("MNDC Students", "Sundry Debtors", "-58000.00")]),
@@ -678,7 +678,8 @@ async def main():
                 return wa.web.Response(text="<ENVELOPE><BODY><IMPORTDATA><REQUESTDATA>" + vch(
                     q["from"], "Ramesh", "B.Ed fees&#4;", [("Cash", "-5000.00"), ("B.Ed Fees", "5000.00")]) + vch(
                     q["to"], "X", "cancelled", [("Cash", "-1.00"), ("B.Ed Fees", "1.00")], "Yes")
-                    + "</REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>")
+                    + (vch("20260331", "Old", "Tally's own date", [("Cash", "-9.00"), ("B.Ed Fees", "9.00")])
+                       if q["from"] == "20260801" else "") + "</REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>")
             return wa.web.Response(text=answers[q["read"]])
         gapp = wa.web.Application()
         gapp.add_routes([wa.web.get("/hello", gate), wa.web.post("/read", gate)])
@@ -706,6 +707,7 @@ async def main():
             r, _ = await wa.run_tool(s, "tally", {"action": "ledgers", "under": "sundry debtors"})  # with its subgroups
             assert r["count"] == 46 and r["total"] == "₹47,000.00 Dr" and len(r["rows"]) == wa.TALLY_ROWS, r
             assert (s.p / r["file"]).exists()  # every row is in the Excel file
+            assert reads[-1]["to"] == f"{wa.date.today():%Y%m%d}" and r["balances_on"] == f"{wa.date.today():%d/%m/%Y}"
             reads.clear()
             r, _ = await wa.run_tool(s, "tally", {"action": "vouchers", "from": "2026-07-01", "to": "2026-09-15",
                                                   "ledger": "b.ed"})
@@ -713,6 +715,7 @@ async def main():
                                                              ("20260901", "20260915")], reads
             assert r["count"] == 3 and r["net"] == "₹15,000.00 Cr" and r["left_out"].startswith("3 "), r
             assert r["rows"][0] == "01/07/2026 · Receipt 1 · Ramesh · ₹5,000.00 Cr · B.Ed fees", r["rows"]
+            assert "31/03/2026" in r["not_shown"]  # an entry of a day not asked for is left out, and said
             await fails({"action": "ledgers", "company": "Wrong"}, ValueError, "Could not set")
             await fails({"action": "ledgers", "company": "Closed"}, ValueError, "not open")
             await fails({"action": "ledgers", "under": "Nope"}, ValueError, "no group")

@@ -106,7 +106,8 @@ function Day([string]$s) {
     [datetime]::ParseExact($s, 'yyyyMMdd', $Inv)
 }
 
-function Request($q) {  # the Tally request for one read, made only from fixed parts and checked values
+function Request($q, [switch]$List) {  # the Tally request for one read, made only from fixed parts and checked values
+    # $List: entries as a list of vouchers filtered by date, instead of the Day Book
     $vars = ''
     if ($q.company) {
         if ("$($q.company)".Length -gt 200) { throw 'company name too long' }
@@ -119,13 +120,21 @@ function Request($q) {  # the Tally request for one read, made only from fixed p
     if ($to) {
         if (-not $from) { $from = $to }
         if ($to -lt $from) { throw 'to is before from' }
-        $vars += '<SVFROMDATE>' + $from.ToString('yyyyMMdd') + '</SVFROMDATE><SVTODATE>' + $to.ToString('yyyyMMdd') + '</SVTODATE>'
+        $f, $t = $from.ToString('d-MMM-yyyy', $Inv), $to.ToString('d-MMM-yyyy', $Inv)  # Tally's own way: 1-Aug-2026
+        $vars += '<SVFROMDATE TYPE="Date">' + $f + '</SVFROMDATE><SVTODATE TYPE="Date">' + $t + '</SVTODATE>'
     }
     $read = "$($q.read)"
     if ($read -eq 'vouchers') {
         if (-not $to) { throw 'vouchers need from and to' }
         if (($to - $from).Days -gt 30) { throw 'vouchers: at most 31 days per read' }
-        return $Head + '<TYPE>Data</TYPE><ID>DayBook</ID></HEADER><BODY><DESC>' + $Format + $vars + '</STATICVARIABLES></DESC></BODY></ENVELOPE>'
+        if (-not $List) {
+            return $Head + '<TYPE>Data</TYPE><ID>DayBook</ID></HEADER><BODY><DESC>' + $Format + $vars + '</STATICVARIABLES></DESC></BODY></ENVELOPE>'
+        }
+        return $Head + '<TYPE>Collection</TYPE><ID>RaionList</ID></HEADER><BODY><DESC>' + $Format + $vars + '</STATICVARIABLES><TDL><TDLMESSAGE>' +
+            '<COLLECTION NAME="RaionList" ISINITIALIZE="Yes"><TYPE>Voucher</TYPE><FETCH>Date,VoucherTypeName,VoucherNumber,' +
+            'PartyLedgerName,Narration,IsCancelled,IsOptional,AllLedgerEntries.*</FETCH><FILTER>RaionDays</FILTER></COLLECTION>' +
+            '<SYSTEM TYPE="Formulae" NAME="RaionDays">$Date &gt;= $$Date:"' + $f + '" AND $Date &lt;= $$Date:"' + $t + '"</SYSTEM>' +
+            '</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>'
     }
     if (-not $Lists.ContainsKey($read)) { throw "unknown read '$read'" }
     $type, $fields = $Lists[$read]
@@ -153,6 +162,15 @@ function Ask-Tally([string]$xml) {
     } finally { $resp.Close() }
 }
 
+function Right-Days($body, $q) {  # Tally's answer has entries, all dated within the asked days
+    if ($body.Length -gt 3 -and ($body[1] -eq 0 -or $body[3] -eq 0)) { $text = [Text.Encoding]::Unicode.GetString($body) }
+    else { $text = [Text.Encoding]::UTF8.GetString($body) }
+    $days = @([regex]::Matches($text, '<VOUCHER\b[\s\S]*?<DATE\b[^>]*>(\d{8})</DATE>') | ForEach-Object { $_.Groups[1].Value })
+    $from = "$($q.from)"
+    if (-not $from) { $from = "$($q.to)" }
+    $days.Count -gt 0 -and -not ($days | Where-Object { $_ -lt $from -or $_ -gt "$($q.to)" })
+}
+
 try {
     $l = New-Object Net.HttpListener
     $l.Prefixes.Add("http://${Listen}:$Port/")
@@ -172,7 +190,14 @@ while ($true) {
         if ($ctx.Request.ContentLength64 -gt 4096) { Reply $ctx 413 'too big'; continue }
         $q = (New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8)).ReadToEnd() | ConvertFrom-Json
         try { $xml = Request $q } catch { Reply $ctx 400 "$($_.Exception.Message)"; continue }
-        try { $t = Ask-Tally $xml }
+        try {
+            $t = Ask-Tally $xml
+            if ("$($q.read)" -eq 'vouchers' -and -not (Right-Days $t.body $q)) {
+                # the Day Book can come back for Tally's own date, whatever dates it was given: ask for the same days
+                # as a list of vouchers and keep that answer if it has them (Raion leaves out entries of other days)
+                try { $u = Ask-Tally (Request $q -List); if (Right-Days $u.body $q) { $t = $u } } catch {}
+            }
+        }
         catch {
             $w = $_.Exception.InnerException
             if ($w -is [Net.WebException] -and "$($w.Status)" -eq 'Timeout') {
