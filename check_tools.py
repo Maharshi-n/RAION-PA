@@ -732,8 +732,9 @@ async def main():
         # bulk WhatsApp: admins only, never in an automation, the admin's number added by the code (not the model),
         # the app's refusals passed on
         assert next(t for t in wa.TOOLS if t["name"] == "whatsapp_bulk")["admin"] and "whatsapp_bulk" not in wa.JOB_TOOLS
-        calls, bulk = [], (wa.BULK_URL, wa.BULK)
-        wa.BULK = Path(tempfile.mkdtemp()) / "bulk.json"
+        calls, bulk = [], (wa.BULK_URL, wa.BULK_KEY_FILE)
+        assert wa.BULK_KEY_FILE == wa.RUNTIME / "bulk.json", wa.BULK_KEY_FILE  # the real one, not shadowed
+        wa.BULK_KEY_FILE = Path(tempfile.mkdtemp()) / "bulk.json"
 
         async def app_api(req):
             if req.headers.get("X-API-Key") != "bk" + "0" * 20:
@@ -769,7 +770,7 @@ async def main():
             assert r == {"preview_id": "p1", "total": 42} and calls[-1]["by"] == s.num, calls  # the model can't pick by
             assert "phone_column" not in calls[-1]  # empty fields aren't sent
             await bulk_fails({"action": "send", "preview_id": "p1"}, ValueError, "over 10 minutes")
-            wa.BULK.write_text(json.dumps({"key": "wrong"}), encoding="utf-8")
+            wa.BULK_KEY_FILE.write_text(json.dumps({"key": "wrong"}), encoding="utf-8")
             await bulk_fails({"action": "catalog"}, ValueError, "key doesn't match")
             await brunner.cleanup()
             down = True
@@ -777,7 +778,7 @@ async def main():
         finally:
             if not down:
                 await brunner.cleanup()
-            wa.BULK_URL, wa.BULK = bulk
+            wa.BULK_URL, wa.BULK_KEY_FILE = bulk
         print("ok")
     finally:
         p.stdin.close()

@@ -26,7 +26,7 @@ ADMIN_MEM = MEM / "admin"  # admins only: their own timeline and topics (money, 
 RUNTIME = ROOT / ".runtime"
 BACKUPS = ROOT / "backups"
 TALLY = RUNTIME / "tally.json"  # Tally's gate (RaionGate/gate.ps1 on the accountant's PC): its code, where it was found
-BULK = RUNTIME / "bulk.json"  # the messenger app's key for bulk WhatsApp (its WA_RAION_SECRET), given once in chat
+BULK_KEY_FILE = RUNTIME / "bulk.json"  # the messenger app's key for bulk WhatsApp (its WA_RAION_SECRET), given once in chat
 TALLY_MAP = ADMIN_MEM / "topics" / "Tally map.md"  # Raion's notes of where things are in Tally (never amounts)
 
 
@@ -1774,9 +1774,9 @@ async def bulk_tool(s: Session, a: dict) -> dict:
         if len(key := str(a.get("key") or "").strip()) < 20 or " " in key:
             raise ValueError("the key is the long code set as WA_RAION_SECRET in the app (ask Maharshi)")
         RUNTIME.mkdir(exist_ok=True)
-        BULK.write_text(json.dumps({"key": key}), encoding="utf-8")
+        BULK_KEY_FILE.write_text(json.dumps({"key": key}), encoding="utf-8")
         a = {"action": "catalog"}  # tried at once: a wrong key says so now
-    key = json.loads(BULK.read_text(encoding="utf-8"))["key"] if BULK.exists() else ""
+    key = json.loads(BULK_KEY_FILE.read_text(encoding="utf-8"))["key"] if BULK_KEY_FILE.exists() else ""
     if not key:
         raise ValueError("bulk WhatsApp isn't connected: an admin gives the app's key once (connect); ask Maharshi")
     body = {k: v for k, v in a.items() if v not in (None, "") and k != "key"} | {"by": s.num}
