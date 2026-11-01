@@ -32,7 +32,7 @@ async def main():
     try:
         assert (await rpc(1, "initialize", {"protocolVersion": "2025-06-18"}))["serverInfo"]["name"] == "raion"
         names = [t["name"] for t in (await rpc(2, "tools/list"))["tools"]]
-        assert "send_message" in names and "print" not in names and "tally" not in names, names  # admin-only
+        assert "send_message" in names and not {"print", "tally", "whatsapp_bulk"} & set(names), names  # admin-only
         r = await rpc(3, "tools/call", {"name": "make_pdf", "arguments": {"html": "work/t.html", "name": "t"}})
         assert json.loads(r["content"][0]["text"])["unfilled"] == ["[DATE]"]
         assert r["content"][1]["type"] == "image"  # the model sees its own preview
@@ -728,6 +728,56 @@ async def main():
             if not down:
                 await runner.cleanup()
             wa.TALLY, wa.GATE_PORT, wa._lan_hosts = tally, gate_port, lan
+
+        # bulk WhatsApp: admins only, never in an automation, the admin's number added by the code (not the model),
+        # the app's refusals passed on
+        assert next(t for t in wa.TOOLS if t["name"] == "whatsapp_bulk")["admin"] and "whatsapp_bulk" not in wa.JOB_TOOLS
+        calls, bulk = [], (wa.BULK_URL, wa.BULK)
+        wa.BULK = Path(tempfile.mkdtemp()) / "bulk.json"
+
+        async def app_api(req):
+            if req.headers.get("X-API-Key") != "bk" + "0" * 20:
+                return wa.web.json_response({"error": "forbidden: the key doesn't match"}, status=403)
+            calls.append(q := await req.json())
+            if q["action"] == "send":
+                return wa.web.json_response({"error": "this preview is over 10 minutes old"}, status=400)
+            return wa.web.json_response({"preview_id": "p1", "total": 42})
+        bapp = wa.web.Application()
+        bapp.add_routes([wa.web.post("/wa/api/raion", app_api)])
+        brunner, down = wa.web.AppRunner(bapp, access_log=None), False
+        await brunner.setup()
+        await wa.web.TCPSite(brunner, "127.0.0.1", 0).start()
+        async def bulk_fails(a, kind, words):
+            try:
+                await wa.run_tool(s, "whatsapp_bulk", a)
+            except kind as e:
+                assert words in str(e), e
+                return
+            raise AssertionError(f"{a} should fail")
+        try:
+            wa.BULK_URL = f"http://127.0.0.1:{brunner.addresses[0][1]}/wa/api/raion"
+            await bulk_fails({"action": "catalog"}, ValueError, "isn't connected")
+            await bulk_fails({"action": "connect", "key": "short"}, ValueError, "long code")
+            s.admin = False
+            await bulk_fails({"action": "connect", "key": "x" * 24}, PermissionError, "only for admins")  # staff never
+            s.admin = True
+            await bulk_fails({"action": "connect", "key": "x" * 24}, ValueError, "key doesn't match")  # tried at once
+            r, _ = await wa.run_tool(s, "whatsapp_bulk", {"action": "connect", "key": " bk" + "0" * 20 + " "})
+            assert r["total"] == 42 and calls[-1] == {"action": "catalog", "by": s.num}, calls  # the key never in a body
+            r, _ = await wa.run_tool(s, "whatsapp_bulk", {"action": "preview", "template_id": 3, "lists": ["wa:1"],
+                                                          "by": "910000000000", "phone_column": ""})
+            assert r == {"preview_id": "p1", "total": 42} and calls[-1]["by"] == s.num, calls  # the model can't pick by
+            assert "phone_column" not in calls[-1]  # empty fields aren't sent
+            await bulk_fails({"action": "send", "preview_id": "p1"}, ValueError, "over 10 minutes")
+            wa.BULK.write_text(json.dumps({"key": "wrong"}), encoding="utf-8")
+            await bulk_fails({"action": "catalog"}, ValueError, "key doesn't match")
+            await brunner.cleanup()
+            down = True
+            await bulk_fails({"action": "catalog"}, ConnectionError, "can't be reached")
+        finally:
+            if not down:
+                await brunner.cleanup()
+            wa.BULK_URL, wa.BULK = bulk
         print("ok")
     finally:
         p.stdin.close()

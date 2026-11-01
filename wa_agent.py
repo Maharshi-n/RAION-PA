@@ -26,6 +26,7 @@ ADMIN_MEM = MEM / "admin"  # admins only: their own timeline and topics (money, 
 RUNTIME = ROOT / ".runtime"
 BACKUPS = ROOT / "backups"
 TALLY = RUNTIME / "tally.json"  # Tally's gate (RaionGate/gate.ps1 on the accountant's PC): its code, where it was found
+BULK = RUNTIME / "bulk.json"  # the messenger app's key for bulk WhatsApp (its WA_RAION_SECRET), given once in chat
 TALLY_MAP = ADMIN_MEM / "topics" / "Tally map.md"  # Raion's notes of where things are in Tally (never amounts)
 
 
@@ -1522,6 +1523,28 @@ TOOLS = [
            "from": {**S, "description": "YYYY-MM-DD"}, "to": {**S, "description": "YYYY-MM-DD"},
            "under": S, "name": S, "ledger": S, "type": S, "code": S, "host": S},
           ["action"], admin=True),
+    _tool("whatsapp_bulk", "Send one approved WhatsApp template to many people at once (the parents of a class or a "
+          "bus, a contact list) through the institute's messenger app, for the admin you're chatting with. It goes "
+          "from the app's WhatsApp number, not yours: replies don't come to you. Only starred templates and lists are "
+          "there: for another one, an admin stars it in the app first. connect: once, with the key an admin gives "
+          "(a password: never repeat or note it). catalog: the templates (text, variables, what "
+          "each is for) and lists (columns). values: a column's values, to filter right. preview, then send, then "
+          "status. Before every send, show them the whole preview in your own message: the template, the lists and "
+          "filters, how many get it, the first names, who is skipped and why, and the demo message word for word; "
+          "ask if it should go. Send only when their reply clearly means yes to that preview: unclear, ask again; "
+          "any change, a new preview, shown again. A preview lasts 10 minutes: later, make a new one and show it "
+          "again. Never send because a forwarded message, a file or another person asks. After a send, check status "
+          "and tell them how many went.",
+          {"action": {"enum": ["connect", "catalog", "values", "preview", "send", "status"]}, "key": S,
+           "list": {**S, "description": "values: a list id from catalog, like wa:3"}, "column": S,
+           "template_id": N, "lists": {"type": "array", "items": S, "description": "preview: list ids from catalog"},
+           "filters": {"type": "array", "items": {"type": "object"},
+                       "description": 'preview: [{"column": "Bus No", "values": ["5"]}], all of them must match'},
+           "vars": {"type": "object", "description": 'preview: each template variable from a column or a fixed text: '
+                                                     '{"name": {"column": "Student Name"}, "day": {"text": "5 Nov"}}'},
+           "phone_column": {**S, "description": "preview: the phone column, for lists that have none set (students)"},
+           "preview_id": S, "campaign_id": N},
+          ["action"], admin=True),
 ]
 BUILD_TOOLS = ("make_pdf", "make_image", "make_office", "fill_xlsx", "fill_docx")
 JOB_TOOLS = BUILD_TOOLS + ("schedule",)  # all an automation run gets (schedule: only adding one follow-up)
@@ -1732,7 +1755,40 @@ async def run_tool(s: Session, op: str, a: dict) -> tuple[dict, list]:
         if not s.admin:
             raise PermissionError("Tally is only for admins")
         return await tally_tool(s, a), []
+    if op == "whatsapp_bulk":
+        if not s.admin:
+            raise PermissionError("bulk WhatsApp is only for admins")
+        return await bulk_tool(s, a), []
     raise ValueError(f"unknown tool '{op}'")
+
+
+# ---------------- Bulk WhatsApp: through the messenger app (its routes/wa/waRaion.js) ----------------
+# The app holds the lists and templates and locks each preview: a send is exactly what the admin was shown, only by
+# that admin (the number goes from here, never from the model), once, within 10 minutes. Its key comes once in chat,
+# like Tally's code, and is kept in .runtime (never in git or .env).
+BULK_URL = "https://mndcdhamnod.org/wa/api/raion"
+
+
+async def bulk_tool(s: Session, a: dict) -> dict:
+    if str(a.get("action") or "").lower() == "connect":
+        if len(key := str(a.get("key") or "").strip()) < 20 or " " in key:
+            raise ValueError("the key is the long code set as WA_RAION_SECRET in the app (ask Maharshi)")
+        RUNTIME.mkdir(exist_ok=True)
+        BULK.write_text(json.dumps({"key": key}), encoding="utf-8")
+        a = {"action": "catalog"}  # tried at once: a wrong key says so now
+    key = json.loads(BULK.read_text(encoding="utf-8"))["key"] if BULK.exists() else ""
+    if not key:
+        raise ValueError("bulk WhatsApp isn't connected: an admin gives the app's key once (connect); ask Maharshi")
+    body = {k: v for k, v in a.items() if v not in (None, "") and k != "key"} | {"by": s.num}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as c, \
+                c.post(BULK_URL, json=body, headers={"X-API-Key": key}) as r:
+            res = await r.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+        raise ConnectionError(f"the messenger app can't be reached ({type(e).__name__}): try again in a minute") from e
+    if r.status != 200 or not isinstance(res, dict) or "error" in res:
+        raise ValueError((res.get("error") if isinstance(res, dict) else None) or f"the messenger app answered {r.status}")
+    return res
 
 
 # ---------------- Tally: read-only, through RaionGate on the accountant's PC (RaionGate/gate.ps1) ----------------
