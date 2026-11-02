@@ -732,9 +732,11 @@ async def main():
         # bulk WhatsApp: admins only, never in an automation, the admin's number added by the code (not the model),
         # the app's refusals passed on
         assert next(t for t in wa.TOOLS if t["name"] == "whatsapp_bulk")["admin"] and "whatsapp_bulk" not in wa.JOB_TOOLS
-        calls, bulk = [], (wa.BULK_URL, wa.BULK_KEY_FILE)
-        assert wa.BULK_KEY_FILE == wa.RUNTIME / "bulk.json", wa.BULK_KEY_FILE  # the real one, not shadowed
+        calls, bulk, verdict = [], (wa.BULK_URL, wa.BULK_KEY_FILE, wa.TPL_WATCH, wa.handle_message), ["PENDING"]
+        assert wa.BULK_KEY_FILE == wa.RUNTIME / "bulk.json", wa.BULK_KEY_FILE  # the real ones, not shadowed
+        assert wa.TPL_WATCH == wa.RUNTIME / "bulk_templates.json", wa.TPL_WATCH
         wa.BULK_KEY_FILE = Path(tempfile.mkdtemp()) / "bulk.json"
+        wa.TPL_WATCH = wa.BULK_KEY_FILE.parent / "bulk_templates.json"
 
         async def app_api(req):
             if req.headers.get("X-API-Key") != "bk" + "0" * 20:
@@ -742,6 +744,11 @@ async def main():
             calls.append(q := await req.json())
             if q["action"] == "send":
                 return wa.web.json_response({"error": "this preview is over 10 minutes old"}, status=400)
+            if q["action"] == "create_template":
+                return wa.web.json_response({"template_id": 7, "name": q["name"], "status": "PENDING"})
+            if q["action"] == "template_status":
+                return wa.web.json_response({"template_id": 7, "name": "rain_notice", "status": verdict[0],
+                                             "category": "MARKETING", "starred": False})
             return wa.web.json_response({"preview_id": "p1", "total": 42})
         bapp = wa.web.Application()
         bapp.add_routes([wa.web.post("/wa/api/raion", app_api)])
@@ -770,6 +777,24 @@ async def main():
             assert r == {"preview_id": "p1", "total": 42} and calls[-1]["by"] == s.num, calls  # the model can't pick by
             assert "phone_column" not in calls[-1]  # empty fields aren't sent
             await bulk_fails({"action": "send", "preview_id": "p1"}, ValueError, "over 10 minutes")
+
+            # a template Raion makes is watched by the code (not the model) until Meta decides; then its chat hears it
+            woken = []
+
+            async def wake(s2, text, *a, **kw):
+                woken.append((s2.num, text))
+            wa.handle_message = wake
+            r, _ = await wa.run_tool(s, "whatsapp_bulk", {"action": "create_template", "name": "rain_notice",
+                                                          "body": "School is closed on {{day}} due to rain. Thanks."})
+            assert r["status"] == "PENDING" and "by itself" in r["note"] and wa._watched()[0]["num"] == s.num
+            await wa.check_templates()
+            assert not woken and len(wa._watched()) == 1  # still pending: still watched
+            verdict[0] = "APPROVED"
+            await wa.check_templates()
+            await asyncio.sleep(0)
+            assert woken and woken[0][0] == s.num and "APPROVED as MARKETING, not starred" in woken[0][1], woken
+            assert "not a message from them" in woken[0][1] and wa._watched() == []
+
             wa.BULK_KEY_FILE.write_text(json.dumps({"key": "wrong"}), encoding="utf-8")
             await bulk_fails({"action": "catalog"}, ValueError, "key doesn't match")
             await brunner.cleanup()
@@ -778,7 +803,7 @@ async def main():
         finally:
             if not down:
                 await brunner.cleanup()
-            wa.BULK_URL, wa.BULK_KEY_FILE = bulk
+            wa.BULK_URL, wa.BULK_KEY_FILE, wa.TPL_WATCH, wa.handle_message = bulk
         print("ok")
     finally:
         p.stdin.close()
