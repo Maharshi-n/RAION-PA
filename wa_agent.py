@@ -2782,9 +2782,15 @@ def call_prompt(num, reminder=None) -> Path:
     return p
 
 
-async def from_call(num, text):
+async def from_call(num, text, build=False):
     """Work asked for on a call goes to their WhatsApp Raion (the call brain only talks). A call they made or
-    picked up opens WhatsApp's 24-hour window, so the result can go out at once."""
+    picked up opens WhatsApp's 24-hour window, so the result can go out at once. build: a web app to make and put
+    live; asking for it on the call is their yes to publish, so it goes out without waiting for a preview reply.
+    Admins only: anyone else's request goes as a plain one, under the normal rules (an admin has to ask)."""
+    if build and session(num).admin:
+        text = ("Build this web app on the college website (global/WEBAPPS.md) and put it live: asking for it on the "
+                "call is their yes, so publish it as soon as npm test prints ok, then send the preview picture and "
+                f"the link. If it's something our server can't run, say so and offer what's possible. Their request: {text}")
     asyncio.create_task(handle_message(session(num), f"[Asked on the phone call just now] {text}", False))
 
 

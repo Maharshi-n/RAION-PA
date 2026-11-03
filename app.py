@@ -1,5 +1,5 @@
-"""Raion's server: WhatsApp webhook (messages -> wa_agent, calls both ways), the voice-call loop (Sarvam STT -> fast
-Claude brain -> Sarvam TTS; real work goes to the WhatsApp agent) and the local dashboard."""
+"""Raion's server: WhatsApp webhook (messages -> wa_agent, calls both ways), the voice-call loop (all Sarvam: STT ->
+Sarvam LLM brain -> TTS; real work goes to the WhatsApp agent) and the local dashboard."""
 import asyncio, base64, fractions, hashlib, hmac, json, os, time
 from pathlib import Path
 
@@ -19,7 +19,7 @@ def load_env():
 
 
 load_env()
-from brain import MODEL, Brain  # noqa: E402  (reads CLAUDE_MODEL from env)
+from brain import Brain, SarvamBrain  # noqa: E402  (reads CLAUDE_MODEL from env)
 import pymupdf  # noqa: E402
 import printing, wa_agent  # noqa: E402  (read the env loaded above)
 
@@ -32,16 +32,18 @@ OLD_WEBHOOK = os.environ.get("OLD_WEBHOOK_URL", "")
 SARVAM_KEY = os.environ.get("SARVAM_API_KEY", "")
 STT_MODEL = os.environ.get("SARVAM_STT_MODEL", "saaras:v4")
 TTS_MODEL = os.environ.get("SARVAM_TTS_MODEL", "bulbul:v4-flash")
-TTS_SPEAKER = os.environ.get("SARVAM_SPEAKER", "rahul_hi_conversational")
-TTS_PACE = float(os.environ.get("SARVAM_PACE", "1.3"))  # voice speed, 0.5-2.0
+# calls have their own soft voice; WhatsApp voice notes keep SARVAM_SPEAKER / SARVAM_PACE
+TTS_SPEAKER = os.environ.get("SARVAM_CALL_SPEAKER", "ratan_hi_latenight_warm")
+TTS_PACE = float(os.environ.get("SARVAM_CALL_PACE", "1.1"))  # voice speed, 0.5-2.0
 PORT = int(os.environ.get("PORT", "8080"))
 
 # ponytail: Sarvam pay-as-you-go list prices + fixed USD->INR; a demo meter, not billing
 STT_INR_PER_MIN, TTS_INR_PER_1K_CHARS, USD_INR = 0.49, 2.0, 88
 GREETING = "नमस्ते! मैं Raion बोल रहा हूँ। बताइए, क्या करना है?"
 OPENER = "नमस्ते, मैं Raion बोल रहा हूँ।"  # said the moment they pick up a reminder call, while the brain words the rest
-# calls need a fast talker: the call brain only talks and hands real work to the WhatsApp agent (AGENT_MODEL)
-CALL_MODEL = os.environ.get("CALL_MODEL") or MODEL
+# calls need a fast talker: the call brain only talks and hands real work to the WhatsApp agent (AGENT_MODEL).
+# A Claude name here (CALL_MODEL=haiku) puts calls back on Claude.
+CALL_MODEL = os.environ.get("CALL_MODEL") or "sarvam-105b-conversations"
 
 # ---------------- shared state + dashboard broadcast ----------------
 clients: set[web.WebSocketResponse] = set()
@@ -153,7 +155,9 @@ async def call_session(pc: RTCPeerConnection, in_track, out: OutTrack, label: st
     started, tts_chars = time.time(), 0
     muted = False  # set on barge-in so leftover TTS audio of the interrupted reply is dropped
     hdr = {"Api-Subscription-Key": SARVAM_KEY}
-    brain = Brain(model=CALL_MODEL, system_file=await asyncio.to_thread(wa_agent.call_prompt, num, reminder))
+    prompt = await asyncio.to_thread(wa_agent.call_prompt, num, reminder)
+    brain = (SarvamBrain(CALL_MODEL, prompt, SARVAM_KEY) if CALL_MODEL.startswith("sarvam")
+             else Brain(model=CALL_MODEL, system_file=prompt))
     said: list[tuple[str, str]] = []  # the conversation, for their WhatsApp chat afterwards
 
     def cost():
@@ -246,9 +250,9 @@ async def call_session(pc: RTCPeerConnection, in_track, out: OutTrack, label: st
                     continue
                 hang = False
                 for a in r["actions"]:
-                    if a.get("op") == "whatsapp" and a.get("text") and num:
-                        await broadcast({"type": "tool", "name": "whatsapp", "args": a})
-                        await wa_agent.from_call(num, str(a["text"]))
+                    if a.get("op") in ("whatsapp", "build") and a.get("text") and num:
+                        await broadcast({"type": "tool", "name": a["op"], "args": a})
+                        await wa_agent.from_call(num, str(a["text"]), build=a["op"] == "build")
                     elif a.get("op") == "hangup":
                         hang = True
                     else:
