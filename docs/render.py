@@ -12,8 +12,6 @@ EDGE = next(p for p in (r"C:\Program Files (x86)\Microsoft\Edge\Application\msed
 TMP = Path(tempfile.mkdtemp())
 GIFS = {  # name: (steps, how long each stays, ms)
     "call": ((0, 1, 2, 3, 5), (2200, 2200, 1600, 2600, 3400)),  # picked up, heard, decided, speaking, link on WhatsApp
-    "letter": ((0, 1, 2, 3), (1800, 2200, 3200, 3000)),
-    "parents": ((0, 1, 2, 3), (1800, 3800, 1400, 3000)),
     "errand": ((0, 1, 2, 3), (1800, 2600, 2800, 3200)),
 }
 

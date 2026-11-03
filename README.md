@@ -7,7 +7,16 @@
 Staff message it or call it. It writes the letters, fills the registers, reminds, chases people,<br>
 reads the accounts, messages parents and builds small web apps. Its ears, voice and call brain are Sarvam.
 
-<img src="docs/call.gif" width="49%" alt="A WhatsApp call: Raion picks up in Hindi, Saaras v4 hears a request for a fees dashboard, Sarvam 105B decides to build it, Bulbul v4 answers, and the live link arrives on WhatsApp"> <img src="docs/letter.gif" width="49%" alt="On WhatsApp the principal asks for a PTM notice; Raion takes the letterhead format, writes it in Hindi, checks the preview, sends the PDF and prints 2 copies">
+Real chats with Raion on WhatsApp, 3 November 2026. Every request was a voice note; the boxes say what was in it.<br>
+Older messages and students' names are blurred.
+
+| | |
+|:-:|:-:|
+| <img src="docs/shots/letter.jpg" alt="A voice note asks for a class 10 PTM notice; Raion sends it on the school's letterhead in Hindi, as a picture and a PDF, not printed"><br><sub>A PTM notice on the school's own letterhead, in Hindi</sub> | <img src="docs/shots/voice.jpg" alt="A voice note asks Raion to introduce itself; Raion answers with a 19-second voice note, then writes out what it said"><br><sub>Raion introduces itself in a voice note</sub> |
+| <img src="docs/shots/parents.jpg" alt="A voice note asks for a fee reminder preview for class 10 parents; Raion shows 75 students in two sections and the exact Hindi message, and sends nothing"><br><sub>A fee reminder for 75 parents: shown, not sent</sub> | <img src="docs/shots/reminder.jpg" alt="A voice note asks for a reminder in 3 minutes; Raion calls at 8:20 PM and later writes out the call word for word"><br><sub>A reminder that came as a phone call, word for word</sub> |
+
+<img src="docs/shots/dashboard.jpg" alt="A 5-second voice note asks for a student-count dashboard; Raion builds it from the office's list of 561 students, asks before publishing, and sends the live link">
+<p align="center"><sub>A 5-second voice note, a dashboard of 561 students by course and year, live on the college website after one tap</sub></p>
 
 </div>
 
@@ -25,7 +34,10 @@ It is built for, and used at, **Maa Narmada Group of Institutes** in Dhamnod, Ma
 
 ## A call, start to finish
 
-The first GIF at the top: the principal calls Raion on WhatsApp and asks, in Hinglish, for a fees dashboard.
+<img src="docs/call.gif" width="330" align="right" alt="A drawing of one call: Raion picks up in Hindi, Saaras v4 hears a request for a fees dashboard, Sarvam 105B decides to build it, Bulbul v4 answers, and the live link arrives on WhatsApp">
+
+The principal calls Raion on WhatsApp and asks, in Hinglish, for a fees dashboard. The drawing on the right shows
+each step; the real reminder call is in the screenshots at the top.
 
 1. **Saaras v4** hears it live, Hindi and English mixed in one sentence.
 2. **Sarvam 105B** decides what to do, in about half a second.
@@ -36,18 +48,8 @@ The first GIF at the top: the principal calls Raion on WhatsApp and asks, in Hin
 The caller can talk over Raion at any time, like with a person. When the call ends, Raion's WhatsApp side gets a
 summary, so nothing said on the phone is lost.
 
-## Real chats
+<br clear="right">
 
-Straight from Raion's WhatsApp, 3 November 2026. Every request was a voice note; the boxes say what was in it.
-Older messages and students' names are blurred.
-
-| | |
-|:-:|:-:|
-| <img src="docs/shots/letter.jpg" alt="A voice note asks for a class 10 PTM notice; Raion sends it on the school's letterhead in Hindi, as a picture and a PDF, not printed"><br><sub>A PTM notice on the school's own letterhead, in Hindi</sub> | <img src="docs/shots/voice.jpg" alt="A voice note asks Raion to introduce itself; Raion answers with a 19-second voice note, then writes out what it said"><br><sub>Raion introduces itself in a voice note</sub> |
-| <img src="docs/shots/parents.jpg" alt="A voice note asks for a fee reminder preview for class 10 parents; Raion shows 75 students in two sections and the exact Hindi message, and sends nothing"><br><sub>A fee reminder for 75 parents: shown, not sent</sub> | <img src="docs/shots/reminder.jpg" alt="A voice note asks for a reminder in 3 minutes; Raion calls at 8:20 PM and later writes out the call word for word"><br><sub>A reminder that came as a phone call, word for word</sub> |
-
-<img src="docs/shots/dashboard.jpg" alt="A 5-second voice note asks for a student-count dashboard; Raion builds it from the office's list of 561 students, asks before publishing, and sends the live link">
-<p align="center"><sub>A 5-second voice note, a dashboard of 561 students by course and year, live on the college website after one tap</sub></p>
 
 ## Sarvam inside
 
@@ -118,13 +120,13 @@ for ears, brain and voice keeps a call quick, and the office dashboard shows wha
 - Sets a follow-up by itself only when something important would be missed ("result aate hi bata dunga").
 
 ### Errands: it chases people for you
-<img src="docs/errand.gif" width="300" align="right" alt="Raion asks 6 bus drivers for today's km reading, reminds the one who is late, and sends the finished sheet">
+<img src="docs/errand.gif" width="300" align="right" alt="A drawing of an errand: Raion asks 6 bus drivers for today's km reading, reminds the one who is late, and sends the finished sheet">
 
 "Saari buses ki aaj ki km reading lao." A locked-down worker messages each driver on WhatsApp, collects the answers
 and meter photos, checks them, nudges the slow ones before the deadline, and builds the sheet for the admin.
 
 It works the same for anything that needs many people: fee data from five teachers, documents from every
-department, a headcount from each class.
+department, a headcount from each class. (The picture is a drawing of the flow.)
 
 <br clear="right">
 
@@ -133,16 +135,12 @@ department, a headcount from each class.
 answer back.
 
 ### Messages to parents, in bulk
-<img src="docs/parents.gif" width="300" align="right" alt="The principal asks for a fee reminder to class 10 parents; Raion shows who gets it and the exact message, and sends to 46 parents after a yes">
-
 - Sends an approved WhatsApp template to a class, a bus or any list in the institute's messenger app, with each
   student's name filled in.
 - Always shows the full preview first (who gets it, who is skipped and why, the exact message) and sends only on a
   clear yes.
 - No message fits? It writes one the way Meta approves as the cheaper notice kind, submits it after a yes, and
   follows Meta's verdict by itself.
-
-<br clear="right">
 
 ### Accounts (Tally)
 - Reads Tally live from the accountant's PC through **RaionGate**, a small gate that can only read.
