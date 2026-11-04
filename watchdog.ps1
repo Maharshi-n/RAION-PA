@@ -4,6 +4,7 @@ $Root = $PSScriptRoot
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
 $Logs = Join-Path $Root "logs"
 $Busy = Join-Path $Root ".runtime\busy"
+$Asked = Join-Path $Root "UPDATE_NOW"  # Raion makes this file after an admin says yes to an update: check now, not in 10 minutes
 New-Item -ItemType Directory -Force $Logs | Out-Null
 $Port = 8080
 $m = Select-String -Path (Join-Path $Root ".env") -Pattern '^\s*PORT\s*=\s*(\d+)' -ErrorAction SilentlyContinue
@@ -65,13 +66,23 @@ while ($true) {
         try { Invoke-WebRequest "http://127.0.0.1:$Port/" -UseBasicParsing -TimeoutSec 10 | Out-Null; $strikes = 0 }
         catch { $strikes++; if ($strikes -ge 3) { Log "server not answering, restarting"; Stop-Tree $server } }
     }
-    # code updates from GitHub, only while nobody is mid-chat
-    if (((Get-Date) - $lastUpdate).TotalMinutes -ge 10) {
+    # code updates from GitHub, only while nobody is mid-chat: every 10 minutes, or every 30 seconds while an admin's ask waits
+    $asked = Test-Path $Asked
+    $since = ((Get-Date) - $lastUpdate).TotalSeconds
+    if ($since -ge 600 -or ($asked -and $since -ge 30)) {
         $lastUpdate = Get-Date
         git -C $Root fetch -q origin main 2>&1 | Out-Null
         $old = git -C $Root rev-parse HEAD
         $new = git -C $Root rev-parse origin/main
+        if ($asked -and $new -and $new -eq $old) {
+            Remove-Item $Asked -Force -ErrorAction SilentlyContinue; Log "update asked for: already on the newest code"
+        }
+        elseif ($asked -and $new -and $new -eq $badCommit) {
+            Remove-Item $Asked -Force -ErrorAction SilentlyContinue
+            Log "update asked for: $($new.Substring(0,7)) failed check_tools before: kept the old code"
+        }
         if ($new -and $old -and $new -ne $old -and $new -ne $badCommit -and (Quiet)) {
+            if ($asked) { Remove-Item $Asked -Force -ErrorAction SilentlyContinue; Log "update asked for by an admin" }
             Log "updating $($old.Substring(0,7)) -> $($new.Substring(0,7))"
             Stop-Tree $server; $server = $null; $serverAt = [datetime]::MinValue  # restarted below on whichever code stays
             $packages = git -C $Root diff --name-only $old $new -- requirements.txt
