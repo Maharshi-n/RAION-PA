@@ -41,7 +41,7 @@ PORT = int(os.environ.get("PORT", "8080"))
 STT_INR_PER_MIN, TTS_INR_PER_1K_CHARS, USD_INR = 0.49, 2.0, 88
 GREETING = "नमस्ते! मैं Raion बोल रहा हूँ। बताइए, क्या करना है?"
 OPENER = "नमस्ते, मैं Raion बोल रहा हूँ।"  # said the moment they pick up a reminder call, while the brain words the rest
-# calls need a fast talker: the call brain only talks and hands real work to the WhatsApp agent (AGENT_MODEL).
+# calls need a fast talker: the call brain only talks and hands real work to the WhatsApp agent (wa_agent.MODEL).
 # A Claude name here (CALL_MODEL=haiku) puts calls back on Claude.
 CALL_MODEL = os.environ.get("CALL_MODEL") or "sarvam-105b-conversations"
 
