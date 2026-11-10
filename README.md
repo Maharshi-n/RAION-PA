@@ -118,6 +118,10 @@ for ears, brain and voice keeps a call quick, and the office dashboard shows wha
 - Makes files on a schedule: the fee defaulters sheet on the 1st of every month, in the office's own Excel.
 - Reminders as a message or as a phone call.
 - Sets a follow-up by itself only when something important would be missed ("result aate hi bata dunga").
+- Runs alone and never asks anything mid-way: what is unclear is settled once, when you set it up.
+- Change one in place ("ab 10 baje bhejna"), and your reply to an update ("sirf MP ki khabrein") changes it too.
+- Runs on Sonnet; another model (Haiku, Opus, Fable) only when you name it for that automation.
+- Can read Tally for figures ("roz subah kal ka fee collection"): such a run gets Tally and no web.
 
 ### Errands: it chases people for you
 <img src="docs/errand.gif" width="300" align="right" alt="A drawing of an errand: Raion asks 6 bus drivers for today's km reading, reminds the one who is late, and sends the finished sheet">

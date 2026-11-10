@@ -52,6 +52,8 @@ async def main():
             assert r.get("isError") and "only build" in r["content"][0]["text"]
             r = await (await c.post("/call", json={"name": "schedule", "arguments": {"action": "list"}})).json()
             assert r.get("isError") and "only add" in r["content"][0]["text"]
+            r = await (await c.post("/call", json={"name": "tally", "arguments": {"action": "status"}})).json()
+            assert r.get("isError") and "only build" in r["content"][0]["text"]  # no Tally unless its automation has it
             await (await c.post("/call", json={"name": "make_pdf", "arguments": {"html": "work/u.html", "name": "u"}})).json()
         assert built == [s.p / "outbox" / "u.pdf"], built
 
@@ -144,6 +146,69 @@ async def main():
         await wa.run_job(NUM, {**f, "id": "q", "own": 3, "sites": []})
         assert wa.SENT[-1]["text"].startswith("🤖 _Ye check main khud 3 baar")  # every 3rd: the owner hears anyway
         wa.Brain = brain
+
+        # a model of its own only when the admin names one (else the default); a wrong name is refused on saving
+        m = (await wa.schedule(s, {"action": "add", "id": "fees", "task": "fee news", "time": "09:00", "days": ["mon"],
+                                   "model": "Opus"}))["saved"]
+        assert m.get("model") == "opus" and "model opus" in wa.jobs_text(NUM), m
+        plain = (await wa.schedule(s, {"action": "add", "id": "plain", "task": "x" * 400, "time": "09:00"}))["saved"]
+        assert "model" not in plain and "x" * 300 + "…" in wa.jobs_text(NUM)  # a brief cut short in the list says so
+        assert "model 'gpt'" in await refused({"action": "add", "task": "t", "time": "09:00", "model": "gpt"})
+
+        # update changes only what's passed; add never replaces one; once (a date) or repeating (days), never both
+        u = (await wa.schedule(s, {"action": "update", "id": "fees", "time": "10:30", "days": None}))["saved"]
+        assert (u["time"], u["task"], u["days"], u.get("model")) == ("10:30", "fee news", ["mon"], "opus"), u
+        # in place: it keeps its spot in the list, and a new brief leaves its clock alone (only a new time restarts it)
+        js = wa._jread(NUM, "jobs.json", [])
+        ids = [j["id"] for j in js]
+        js[ids.index("fees")]["last_run"] = "2026-11-09T10:30:05"
+        wa._jwrite(NUM, "jobs.json", js)
+        u = (await wa.schedule(s, {"action": "update", "id": "fees", "task": "fee news, MP only"}))["saved"]
+        assert (u.get("last_run"), u["created"]) == ("2026-11-09T10:30:05", js[ids.index("fees")]["created"]), u
+        assert "last_run" not in (await wa.schedule(s, {"action": "update", "id": "fees", "time": "10:45"}))["saved"]
+        assert [j["id"] for j in wa._jread(NUM, "jobs.json", [])] == ids
+        assert "already an automation" in await refused({"action": "add", "id": "fees", "task": "other", "time": "09:00"})
+        assert "no automation" in await refused({"action": "update", "id": "nope", "time": "09:00"})
+        assert "not both" in await refused({"action": "update", "id": "fees", "date": "2099-01-05"})  # it has days
+        props = next(x for x in wa.TOOLS if x["name"] == "schedule")["inputSchema"]["properties"]
+        assert "update" in props["action"]["enum"] and {"model", "tally"} <= set(props)  # the chat uses only what's listed
+
+        # the run: on its own model (else the default), told never to ask; what it says reaches their chat with its
+        # automation's id, so their reply can change that one
+        used = []
+
+        class Says(Quiet):
+            def __init__(self, **kw):
+                used.append(kw)
+
+            async def events(self):
+                yield {"type": "result", "result": "aaj ki fee khabar"}
+        wa.Brain = Says
+        wa._jwrite(NUM, "window.json", {"last_in": time.time()})
+        await wa.run_job(NUM, u)
+        await wa.run_job(NUM, plain)
+        wa.Brain = brain
+        assert [k["model"] for k in used] == ["opus", wa.JOB_MODEL], used
+        assert wa.SENT[-1]["text"] == "aaj ki fee khabar"
+        assert s.notes[-2].startswith("Automation update sent to them (automation fees):\naaj ki"), s.notes[-2:]
+        job_prompt = wa.RUNTIME / "prompts" / f"job_{NUM}.md"
+        assert "Never ask them anything" in (jp := job_prompt.read_text(encoding="utf-8")) and "mcp__raion__tally" not in jp
+
+        # a follow-up a run sets for itself keeps its automation's model and Tally: the run can't give itself either
+        await wa.schedule(s, {"action": "remove", "id": "j3"})  # one of the two follow-ups waiting
+        fu = (await wa.schedule(s, {**f, "model": "haiku", "tally": True}, parent=u))["saved"]
+        assert (fu.get("model"), fu.get("tally"), fu["own"]) == ("opus", None, 1), fu
+
+        # an automation that reads Tally: marked for it, and then no web (no watched sites, no web tools in its run)
+        t = (await wa.schedule(s, {"action": "add", "id": "coll", "task": "kal ka collection", "time": "09:00",
+                                   "tally": True}))["saved"]
+        assert t.get("tally") and "Tally" in wa.jobs_text(NUM), t
+        assert "no web" in await refused({"action": "update", "id": "coll", "sites": ["http://x"]})
+        wa.Brain = Says
+        await wa.run_job(NUM, t)
+        wa.Brain = brain
+        assert "WebSearch" in used[0]["tools"] and "Web" not in used[-1]["tools"] + " ".join(used[-1]["allow"]), used[-1]
+        assert "mcp__raion__tally" in job_prompt.read_text(encoding="utf-8")  # Tally's rules: only in its runs
 
         # memory keeper (old layout: the real memory may be on either): the closing pass gets the cleanup rules and
         # the size; a pass asked for while one runs waits
@@ -716,6 +781,17 @@ async def main():
             assert r["count"] == 3 and r["net"] == "₹15,000.00 Cr" and r["left_out"].startswith("3 "), r
             assert r["rows"][0] == "01/07/2026 · Receipt 1 · Ramesh · ₹5,000.00 Cr · B.Ed fees", r["rows"]
             assert "31/03/2026" in r["not_shown"]  # an entry of a day not asked for is left out, and said
+            # an automation marked for Tally: its run can read (never connect), and a long read's Excel isn't sent
+            tb = []
+            wa.JOB_KEYS["tk"] = (s, tb, {"id": "coll", "tally": True})
+            async with wa.aiohttp.ClientSession(await wa.tool_api(), headers={"X-Raion-Key": "tk"}) as tc:
+                assert {x["name"] for x in await (await tc.get("/tools")).json()} == {*wa.JOB_TOOLS, "tally"}
+                r = await (await tc.post("/call", json={"name": "tally", "arguments": {
+                    "action": "ledgers", "under": "sundry debtors"}})).json()
+                assert json.loads(r["content"][0]["text"])["count"] == 46 and tb == [], (r, tb)
+                r = await (await tc.post("/call", json={"name": "tally", "arguments": {"action": "connect",
+                                                                                         "code": code}})).json()
+                assert r.get("isError") and "only read" in r["content"][0]["text"], r
             await fails({"action": "ledgers", "company": "Wrong"}, ValueError, "Could not set")
             await fails({"action": "ledgers", "company": "Closed"}, ValueError, "not open")
             await fails({"action": "ledgers", "under": "Nope"}, ValueError, "no group")
