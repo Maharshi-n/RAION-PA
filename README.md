@@ -122,6 +122,8 @@ for ears, brain and voice keeps a call quick, and the office dashboard shows wha
 - Change one in place ("ab 10 baje bhejna"), and your reply to an update ("sirf MP ki khabrein") changes it too.
 - Runs on Sonnet; another model (Haiku, Opus, Fable) only when you name it for that automation.
 - Can read Tally for figures ("roz subah kal ka fee collection"): such a run gets Tally and no web.
+- Can go to other people you pick ("roz subah sab teachers ko suvichar bhejo"): staff who use Raion get it as Raion's
+  own message, not in your name. A test run and a failure come only to you.
 
 ### Errands: it chases people for you
 <img src="docs/errand.gif" width="300" align="right" alt="A drawing of an errand: Raion asks 6 bus drivers for today's km reading, reminds the one who is late, and sends the finished sheet">

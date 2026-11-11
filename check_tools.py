@@ -8,6 +8,7 @@ from PIL import Image
 
 NUM = "919000000099"
 E1, E2, E3, BOSS = "919000000081", "919000000082", "919000000083", "919000000084"  # errand people, another admin
+TO = "919000000085"  # someone an admin's automation sends to
 os.environ.update({"WA_DRY_RUN": "1", "ALLOWED_NUMBERS": NUM, "ADMIN_NUMBERS": ""})
 import app  # noqa: F401  (loads .env)
 import wa_agent as wa
@@ -209,6 +210,54 @@ async def main():
         wa.Brain = brain
         assert "WebSearch" in used[0]["tools"] and "Web" not in used[-1]["tools"] + " ".join(used[-1]["allow"]), used[-1]
         assert "mcp__raion__tally" in job_prompt.read_text(encoding="utf-8")  # Tally's rules: only in its runs
+
+        # an automation for other people: the admin picks who gets it (people who use Raion), and it reaches each of
+        # them as Raion's own message, not a relay; the admin gets it only when listed too
+        assert "use Raion" in await refused({"action": "update", "id": "plain", "to": [TO]})  # not one of Raion's people
+        wa.ALLOWED.add(TO)
+        to = wa.session(TO, "Ravi")
+        g = (await wa.schedule(s, {"action": "update", "id": "plain", "task": "aaj ka suvichar",
+                                   "to": ["+91 90000 00085"]}))["saved"]
+        assert g.get("to") == [TO] and "Ravi" in wa.jobs_text(NUM), g
+        assert "to" not in (await wa.schedule(s, {"action": "update", "id": "fees", "to": [NUM]}))["saved"]  # only them
+        assert "by phone" in await refused({"action": "update", "id": "j2", "to": [TO]})  # a call is for themselves
+        await wa.schedule(s, {"action": "remove", "id": "j3"})
+        fu = (await wa.schedule(s, {**f, "to": [NUM]}, parent=g))["saved"]
+        assert fu.get("to") == [TO], fu  # a run's follow-up goes to the same people: the run can't pick who
+
+        heard = []
+
+        class Hears(Says):
+            async def send(self, t):
+                heard.append(t)
+        wa.Brain = Hears
+        wa._jwrite(NUM, "window.json", {"last_in": time.time()})
+        n = len(wa.SENT)
+        await wa.run_job(NUM, g)  # Ravi hasn't written to Raion today: the doorbell rings and it waits for him
+        assert [(m["to"], m["type"]) for m in wa.SENT[n:]] == [(TO, "template")], wa.SENT[n:]  # nothing to the admin
+        assert "Ravi" in heard[-1] and "Ravi" in (wa._jdir(NUM) / "log.md").read_text(encoding="utf-8")
+        await wa.run_job(NUM, g)  # the next day's replaces it: only the newest of an automation waits, one doorbell
+        assert len(wa._jread(TO, "window.json", {})["waiting"]) == 1 and len(wa.SENT) == n + 1, wa.SENT[n:]
+        assert [u["text"] for u in await wa.window_opened(to)] == ["aaj ki fee khabar"] and wa.SENT[-1]["to"] == TO
+        assert "automation plain" in to.notes[-1] and "only they can change" in to.notes[-1], to.notes  # whose it is
+        n = len(wa.SENT)
+        await wa.run_job(NUM, g, sample=True)  # "ek baar abhi dikhao": only the admin sees it
+        assert [m["to"] for m in wa.SENT[n:]] == [NUM], wa.SENT[n:]
+        n = len(wa.SENT)
+        await wa.run_job(NUM, {**g, "to": [TO, NUM]})  # his window is open now: straight to him, and to the admin too
+        assert sorted(m["to"] for m in wa.SENT[n:]) == sorted([TO, NUM]), wa.SENT[n:]
+
+        class Fails(Quiet):
+            async def events(self):
+                yield {"type": "result", "result": "boom", "is_error": True}
+        wa.Brain = Fails
+        n = len(wa.SENT)
+        await wa.run_job(NUM, g)
+        wa.Brain = brain
+        assert [m["to"] for m in wa.SENT[n:]] == [NUM] and wa.SENT[-1]["text"].startswith("⚠️")  # a failure: the admin only
+        wa.ALLOWED.discard(TO)
+        wa.SESSIONS.pop(TO, None)
+        shutil.rmtree(wa.PEOPLE / TO, ignore_errors=True)
 
         # memory keeper (old layout: the real memory may be on either): the closing pass gets the cleanup rules and
         # the size; a pass asked for while one runs waits
@@ -885,7 +934,7 @@ async def main():
         p.stdin.close()
         await p.wait()
         wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP = paths  # a failed check: the real ones
-        for n in (NUM, E3, BOSS):
+        for n in (NUM, E3, BOSS, TO):
             shutil.rmtree(wa.PEOPLE / n, ignore_errors=True)
 
 asyncio.run(main())

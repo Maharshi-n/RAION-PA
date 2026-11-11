@@ -710,6 +710,11 @@ tally true: when the task needs figures from Tally ("roz subah kal ka fee collec
 (read-only) and no web, so no sites with it. First do the reads here once, so task names the company, the ledgers
 or groups, the voucher types and what to add up exactly as Tally names them: a run shouldn't have to search. A run
 sends figures, not the Excel of a long read: the full list is for the chat.
+to: when it's for other people ("roz subah 8 baje sab teachers ko aaj ka suvichar bhejo"): their numbers from 'Other
+people who use Raion' (only they can get it: parents and other lists go through whatsapp_bulk). It reaches each of
+them as your own message, not as a relay and without this person's name. Add this person's own number when they want
+a copy; a failure and "ek baar abhi dikhao" come only to them. Say who gets it when you confirm. Someone who hasn't
+written to you for a day gets the short notice to reply first, and only its newest update waits for them.
 Change ("ab 10 baje bhejna", "isko Haiku par kar do"): schedule update with its id and only what changes; the rest
 stays as it was (days [] = every day; date "" = no longer once). A new task replaces the whole brief, and the list
 you're shown may cut it short ("…"): take the full one from schedule list first. "band kar do": remove; "ek baar
@@ -724,6 +729,8 @@ waiting on that must be checked at a certain time. Never for convenience, small 
 case": if in doubt, don't. Then: schedule add with own true, one date and time (no days, no call) and a complete
 brief, and tell them in one line ("6 baje phir check karke bata dunga"). At most 2 can wait at a time.
 Their updates reach them by themselves (after a day without messages, a short notice asks them to reply first); jobs/log.md has every one.
+An update from someone else's automation (its note says whose) is your own message to this person: answer what they
+ask about it, but only the one who set it can change or stop it (offer to pass that on with relay).
 Reminders by phone ("kal subah 10 baje phone karke yaad dilana"): schedule add with call true, a date (once: it
 deletes itself after) or days, and the time; task = the reminder itself in their words with every detail, dates
 written as dates (not "kal": it's heard on another day). At that
@@ -1516,6 +1523,9 @@ TOOLS = [
            "model": {"enum": list(JOB_MODELS), "description": "only when they name a model for this automation "
                                                               "themselves; left out, it runs on Sonnet"},
            "tally": {**B, "description": "the task needs figures from Tally: its runs get Tally (read-only) and no web"},
+           "to": {"type": "array", "items": S, "description": "who gets it, when not only this person: WhatsApp numbers "
+                  "from 'Other people who use Raion' (their own number too for a copy). It reaches each of them as "
+                  "your own message, not as a relay"},
            "own": {**B, "description": "true when you set it yourself, not asked: a one-time follow-up, only when "
                                        "really important (see the Automations rules)"}},
           ["action"], admin=True),
@@ -2283,7 +2293,7 @@ JOB_TALLY = f"""- Tally: this run reads the office's accounts with mcp__raion__t
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 MAX_JOBS, MAX_SITES = 10, 10
-JOB_FIELDS = ("task", "time", "days", "date", "sites", "call", "model", "tally")  # what schedule update can change
+JOB_FIELDS = ("task", "time", "days", "date", "sites", "call", "model", "tally", "to")  # what schedule update can change
 MAX_OWN, LOOP_NOTE = 2, 3  # follow-ups Raion sets itself: waiting at once; every this many in a row (each run
 # setting the next), the owner is told even if there's nothing new
 WINDOW_H = 23.5  # WhatsApp allows free messages for 24 h after their last one (a little margin)
@@ -2313,6 +2323,7 @@ def jobs_text(num) -> str:
                      + (" — 📞 call" if j.get("call") else "") + (" — 🤖 set by you" if j.get("own") else "")
                      + (f" — model {j['model']}" if j.get("model") else "")
                      + (" — 📒 reads Tally, no web" if j.get("tally") else "")
+                     + (" — goes to " + ", ".join(_who(n) + f" (+{n})" for n in j["to"]) if j.get("to") else "")
                      + (f" — moved from {j['moved']} (1-2 AM is maintenance)" if j.get("moved") else "")
                      + f" — {j['task'][:300]}{'…' if len(j['task']) > 300 else ''}"
                      + (f" — watching {', '.join(j['sites'])}" if j["sites"] else "")
@@ -2468,16 +2479,24 @@ async def schedule(s: Session, a: dict, parent: dict | None = None) -> dict:
     if not job and any(j["id"] == jid for j in jobs):
         raise ValueError(f"'{jid}' is already an automation: update changes it, remove deletes it")
     sites = list(dict.fromkeys(str(u).strip() for u in a.get("sites") or [] if str(u).strip()))[:MAX_SITES]
-    model, tally = str(a.get("model") or "").strip().lower(), bool(a.get("tally"))
-    if parent is not None:  # a run's follow-up runs as its automation does: a run never gives itself a model or Tally
-        model, tally = parent.get("model") or "", bool(parent.get("tally"))
+    model, tally, given = str(a.get("model") or "").strip().lower(), bool(a.get("tally")), a.get("to") or []
+    to = list(dict.fromkeys(re.sub(r"\D", "", str(n)) for n in given))
+    if parent is not None:
+        # a run's follow-up runs as its automation does: a run never gives itself a model, Tally or people to write to
+        model, tally, to = parent.get("model") or "", bool(parent.get("tally")), parent.get("to") or []
+    elif bad := [str(n) for n in given if re.sub(r"\D", "", str(n)) not in ALLOWED]:
+        raise ValueError(f"to: only people who use Raion (see 'Other people who use Raion'), not {', '.join(bad)}")
+    if to == [s.num]:
+        to = []  # only themselves, as always
     if model and model not in JOB_MODELS:
         raise ValueError(f"model '{model}': use {', '.join(JOB_MODELS)}")
     if tally and sites:
         raise ValueError("an automation that reads Tally gets no web, so no sites with it: make a second one for those")
+    if to and a.get("call"):
+        raise ValueError("a reminder by phone is only for themselves: no 'to' with call")
     new = {"id": jid, "task": task, "time": f"{int(tm[:-3]):02d}:{tm[-2:]}", "days": days, "date": day,
            "sites": sites, "call": bool(a.get("call")), "created": datetime.now().isoformat(timespec="seconds"),
-           **({"model": model} if model else {}), **({"tally": True} if tally else {}),
+           **({"model": model} if model else {}), **({"tally": True} if tally else {}), **({"to": to} if to else {}),
            **({"own": depth} if own else {})}
     if job and all(job[k] == new[k] for k in ("time", "days", "date")):
         # same times: its clock isn't touched. New times start afresh, so one already past today doesn't fire at once
@@ -2550,6 +2569,10 @@ async def run_job(num, job, late=False, sample=False):
             task += ("\n\nWhat this automation sent them before (oldest first). Don't repeat those items; one that has "
                      "real news since (a date fixed, a result out) can come again with only what changed:\n\n"
                      + "\n\n".join(p[:2000] for p in prev))
+        if job.get("to"):
+            task += ("\n\nThis goes to " + ", ".join(_who(n) or f"+{n}" for n in job["to"]) + ", to each of them as "
+                     "your own message: write it for them, not to one person, and don't say who set it up or that it "
+                     "is sent for someone. Nothing private from this person's folder goes in unless the task asks.")
         if job.get("tally"):  # given here: the admins' area, where the map is kept, isn't open to a run
             task += "\n\nYour Tally map (where things are in Tally: names, never amounts):\n" + _read(TALLY_MAP)
         work = _jdir(num) / "work"
@@ -2606,15 +2629,26 @@ async def run_job(num, job, late=False, sample=False):
                 files.append(Path(shutil.copy2(p, out / p.name)))
         if late:
             text = "_(der se: us samay computer band tha)_\n" + text
+    # the people it's for (still using Raion) get what the run wrote: never a failure, a sample or the note below.
+    # The one who set it gets those, and the message itself only when listed too (or when it's for nobody else)
+    people = [n for n in job.get("to") or [] if n in ALLOWED]
+    theirs = "" if err or sample else text
     if (n := job.get("own", 0)) and n % LOOP_NOTE == 0:  # a chain of its own follow-ups never runs unseen
         text = (f"🤖 _Ye check main khud {n} baar lagatar kar chuka hoon: {job['task'][:80]}. Rokna ho to bolo "
                 "\"band kar do\"._" + ("\n\n" + text if text else ""))
     with open(_jdir(num) / "log.md", "a", encoding="utf-8") as f:
         f.write(f"## {datetime.now():%Y-%m-%d %H:%M} · {job['id']}{' · sample' if sample else ''}"
                 f"{' · late' if late else ''}\n{text or '(nothing new: not sent)'}"
-                + "".join(f"\n[file: {p.name}]" for p in files) + "\n\n")
-    if text:
+                + "".join(f"\n[file: {p.name}]" for p in files)
+                + (f"\n[to: {', '.join(_who(n) or '+' + n for n in people)}]" if people and theirs else "") + "\n\n")
+    if text and (not people or num in people or text != theirs):
         await notify(num, text, files, job["id"])
+    for n in people if theirs else []:
+        if n != num:
+            try:
+                await notify(n, theirs, files, job["id"], by=num)
+            except Exception as e:  # one person's failure doesn't stop the rest
+                print(f"job {num}/{job['id']}: not sent to {n}:", repr(e))
 
 
 async def check_jobs():
@@ -2646,15 +2680,17 @@ async def send_update(s: Session, u: dict) -> str:
     their chat, naming the automation it came from (so their reply can change that one)."""
     files = [Path(f) for f in u.get("files", []) if Path(f).exists()]
     await deliver(s, u["text"], False, [(media_kind(f), f) for f in files])
-    return (f"Automation update sent to them{' (automation ' + u['job'] + ')' if u.get('job') else ''}:\n" + u["text"]
-            + "".join(f"\n[sent {f.name}]" for f in files))
+    src = (f" (from {_who(u['by'])}'s automation {u.get('job')}: only they can change or stop it)" if u.get("by")
+           else f" (automation {u['job']})" if u.get("job") else "")
+    return f"Automation update sent to them{src}:\n" + u["text"] + "".join(f"\n[sent {f.name}]" for f in files)
 
 
-async def notify(num, text, files=(), job=None):
-    """An automatic update (text, and any files; job: the automation's id): sent at once inside the 24-hour window;
-    otherwise it waits and the doorbell template asks them to reply (their reply reopens the window and
-    window_opened() sends it)."""
-    s, u = session(num), {"text": text, "files": [str(f) for f in files], **({"job": job} if job else {})}
+async def notify(num, text, files=(), job=None, by=None):
+    """An automatic update (text, and any files; job: the automation's id; by: the admin who set it, when it goes to
+    someone else): sent at once inside the 24-hour window; otherwise it waits and the doorbell template asks them to
+    reply (their reply reopens the window and window_opened() sends it)."""
+    s, u = session(num), {"text": text, "files": [str(f) for f in files], **({"job": job} if job else {}),
+                          **({"by": by} if by else {})}
     s.add_log("assistant", "[automation] " + text + "".join(f"\n[sent {Path(f).name}]" for f in files), keep=False)
     if window_open(num):
         try:
@@ -2663,7 +2699,9 @@ async def notify(num, text, files=(), job=None):
         except RuntimeError as e:  # e.g. the window had closed after all: wait for their reply as below
             print("update not sent, waiting for their reply:", repr(e))
     w = _jread(num, "window.json", {})
-    w.setdefault("waiting", []).append(u)
+    # of someone else's automation only the newest waits: a month of daily posters never arrives all at once
+    w["waiting"] = [x for x in w.get("waiting", []) if not (by and isinstance(x, dict)
+                                                            and (x.get("by"), x.get("job")) == (by, job))] + [u]
     _jwrite(num, "window.json", w)
     if not w.get("rang"):
         await doorbell(num)
