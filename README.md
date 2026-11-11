@@ -200,7 +200,7 @@ flowchart LR
   T --> W[College website<br>web apps]
 ```
 
-The WhatsApp agent is Claude Code (Fable 5.2) running headless, one session per person, with Raion's own tools served
+The WhatsApp agent is Claude Code (Opus 5.5) running headless, one session per person, with Raion's own tools served
 over MCP. Helpers run on Haiku, Sonnet or Opus, whichever is enough for the piece. No framework and no database:
 the memory is plain files and folders the agent can read, search and fix.
 
