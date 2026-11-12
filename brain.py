@@ -1,6 +1,6 @@
 """The call's brain: Sarvam's own LLM (SarvamBrain, one HTTPS request per turn) or Claude (Brain: one persistent
 `claude -p` process, stream-json in/out; the WhatsApp agent uses Brain too)."""
-import asyncio, json, os, re, shutil
+import asyncio, json, os, re, shutil, time
 from datetime import datetime
 from pathlib import Path
 
@@ -107,6 +107,49 @@ ENV = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "MAX_THINK
        "BASH_DEFAULT_TIMEOUT_MS": "600000", "BASH_MAX_TIMEOUT_MS": "3600000"}  # video renders can take minutes
 ENV_THINKING = {k: v for k, v in ENV.items() if k != "MAX_THINKING_TOKENS"}  # for brains given an effort level
 
+# The Claude plan's meter: every run prints a rate_limit_event (Anthropic counts, per account); the newest is kept here
+USAGE = Path(__file__).parent / ".runtime" / "usage.json"
+WINDOWS = ("five_hour", "seven_day")
+
+
+def save_usage(ev: dict):
+    info = ev.get("rate_limit_info") or {}
+    if w := info.get("unifiedWindows"):
+        USAGE.parent.mkdir(exist_ok=True)
+        USAGE.write_text(json.dumps({"at": time.time(), "status": info.get("status"), **w}), encoding="utf-8")
+
+
+def usage() -> dict:
+    """{"at": when read, "five_hour": (percent left, resets at), "seven_day": (...)}; a window past its reset is full."""
+    try:
+        u = json.loads(USAGE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out, now = {"at": u.get("at", 0)}, time.time()
+    for k in WINDOWS:
+        if isinstance(w := u.get(k), dict):
+            r = int(w.get("resetsAt") or 0)
+            out[k] = (100 if r <= now else round(100 - 100 * float(w.get("utilization") or 0)), r)
+    return out
+
+
+async def probe_usage():
+    """A fresh reading (about $0.001): the smallest run, Haiku with no tools, only for its rate_limit_event."""
+    USAGE.parent.mkdir(exist_ok=True)
+    b = Brain(model="haiku", cwd=USAGE.parent, system="Reply with just: OK")
+    await b.start()
+    try:
+        await b.send("OK")
+
+        async def first_result():
+            async for ev in b.events():
+                if ev.get("type") == "result":
+                    return
+
+        await asyncio.wait_for(first_result(), 90)
+    finally:
+        await b.close()
+
 
 class Brain:
     """Call brain by default (fast, no tools). The WhatsApp agent passes its own sandbox + system prompt file."""
@@ -145,6 +188,8 @@ class Brain:
             ev = json.loads(raw)
             if ev.get("type") == "result":
                 self.cost_usd = ev.get("total_cost_usd") or self.cost_usd
+            elif ev.get("type") == "rate_limit_event":
+                save_usage(ev)
             yield ev
 
     @property
@@ -164,6 +209,8 @@ class Brain:
                 self.cost_usd = ev.get("total_cost_usd") or self.cost_usd
                 if ev.get("is_error"):
                     raise RuntimeError(str(ev.get("result")))
+            elif ev.get("type") == "rate_limit_event":
+                save_usage(ev)
             elif ev.get("type") == "assistant":
                 # act on the answer as soon as it exists instead of waiting for the result event.
                 # One reply can arrive as several events with the same id (thinking block, then text),
