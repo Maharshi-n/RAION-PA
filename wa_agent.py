@@ -607,6 +607,11 @@ If they ask you to stop, stop and say so in one line.
 - Every WhatsApp item arrives separately. Files sent without a following message wait in the person's tray, each
   with its caption. You receive the tray together with their next text or voice message.
 - If they're about to send several files, ask them to send everything and then a message such as "sent".
+- Many files at once (a zip, a folder, a burst of photos or documents): understand the job first, then decide what
+  really has to be looked at, by you, by your helpers or by the photo-card helper (see 'Photos'). When the job only
+  uses them as files (by name, by a list that says what each one is, by where each goes), do it by name with a script
+  and open none. When it depends on what is inside them, open only what it needs: a few to learn the pattern, every
+  one only when each one matters.
 
 # Workspace (current directory = this person's folder)
 - files/<date>/      received files (Word/Excel/PPT have a .txt copy alongside); INDEX.md lists them with captions
@@ -638,7 +643,9 @@ __MEMORY__
 - Every photo gets a text card next to it within a few minutes (photo.jpg.txt: kind, what it shows, date, the text
   in it, Hindi and English keywords). To find one ("pichle saal ki annual function ki newspaper cutting"): Grep the
   cards (*.txt) in global/ and files/ (admins: also people/*/files/) for the kind, event and year in Hindi and
-  English, then look at the best few before sending.
+  English, then look at the best few before sending. The cards come from a helper that looks at each new photo and
+  skips one that already has a card: for a batch that doesn't need its look, write the cards yourself, from what you
+  know, before it gets to them.
 - Everything people send stays in their files/ (never delete it). The institute's record is
   global/<institute>/photos/<year>/<event>/: lasting, useful pictures an admin sends (newspaper cuttings, events and
   functions, certificates and awards, notices, banners, the campus) go there (copy it, with its card if it has one)
@@ -2301,9 +2308,10 @@ nothing is, reply exactly NOTHING.
 - Their folder (read only): __ME__. Institute facts: __GLOBAL__/INSTITUTE.md and <institute>/README.md.
 - Your raion tools are called mcp__raion__<name> (mcp__raion__make_pdf, mcp__raion__schedule, ...): use the full name.
 - Files: when the task asks for one (a PDF, an Excel or Word file, slides, an image card), make it with your raion
-  tools as the rules below say, writing your own files only in __WORK__ (where they say work/). You can't run
-  code: for a detail the task doesn't give, use the obvious default or a dotted blank. Every file you build goes out
-  with your message (its caption), except builds still showing [placeholders]: build only the final ones.
+  tools as the rules below say, writing your own files only in __WORK__ (where they say work/). For a detail the
+  task doesn't give, use the obvious default or a dotted blank. Every file you build goes out with your message
+  (its caption), except builds still showing [placeholders]: build only the final ones.
+__CODE__
 __TALLY__- Follow-up (strict): ONLY when the task can't be finished now for a reason that changes soon (a result not out yet,
   a reply or decision awaited) and missing it would really matter, you may set ONE one-time follow-up: raion schedule,
   action add, a date and time, task = a complete brief for that run (what to check, what you found so far, what to
@@ -2313,6 +2321,12 @@ __PROFILE__
 
 """ + AGENT_PROMPT[AGENT_PROMPT.index("# Documents"):AGENT_PROMPT.index("# Web\n")] \
     + AGENT_PROMPT[AGENT_PROMPT.index("# make_office specs"):]  # the chat's own document rules
+# only in runs not marked for Tally: those get code (a Tally run gets none, since code could reach the web)
+JOB_CODE = """- Code: Bash, PowerShell, Python "__PY__" (openpyxl, python-docx, python-pptx, PyMuPDF, PIL). Work only in
+  __WORK__; never touch anything outside it but to read. Videos: follow __GLOBAL__/VIDEO.md; its helper runs as
+  "__PY__" "__GLOBAL__/tools/video.py" <command>. Every .mp4 you leave in __WORK__ during this run goes out with your
+  message, so leave only the final one (under 16 MB plays inline; up to 100 MB goes as a document).
+"""
 # only in the run of an automation marked for Tally (it then has the tally tool and no web)
 JOB_TALLY = f"""- Tally: this run reads the office's accounts with mcp__raion__tally (read-only; the tool says how) and has no
   web. Every figure comes from a read you make in this run, said with its as_of time: never from memory, their
@@ -2612,6 +2626,7 @@ async def run_job(num, job, late=False, sample=False):
         prompt = RUNTIME / "prompts" / f"job_{num}.md"
         prompt.parent.mkdir(parents=True, exist_ok=True)
         prompt.write_text(JOB_PROMPT.replace("__TALLY__", JOB_TALLY if job.get("tally") else "")
+                          .replace("__CODE__", "" if job.get("tally") else JOB_CODE)
                           .replace("__WHO__", f"{session(num).name} (+{num})")
                           .replace("__NOW__", f"{datetime.now():%A %d/%m/%Y %H:%M}").replace("__ME__", str(PEOPLE / num))
                           .replace("__WORK__", str(work)).replace("__GLOBAL__", str(GLOBAL))
@@ -2621,12 +2636,14 @@ async def run_job(num, job, late=False, sample=False):
         JOB_KEYS[key] = (session(num), built, job)
         mcp = {"raion": {"command": sys.executable, "args": ["-I", str(ROOT / "raion_mcp.py")],
                          "env": {"RAION_URL": await tool_api(), "RAION_KEY": key}}}
-        # no code and no messages: it reads, writes only in jobs/work/ (deny_writes' rule, as an allow) and builds.
-        # One that reads Tally gets no web: the accounts and pages anyone can write never meet in one run
-        web = () if job.get("tally") else ("WebSearch", "WebFetch")
+        # no messages: it reads, writes only in jobs/work/ (deny_writes' rule, as an allow), builds, and runs code
+        # (Bash/PowerShell aren't fenced: the prompt's scope is the guardrail, as in the chat). One that reads Tally
+        # gets no web and no code: the accounts and pages anyone can write never meet in one run
+        web = () if job.get("tally") else ("WebSearch", "WebFetch", "Bash", "PowerShell")
         b = Brain(model=JOB_MODELS.get(job.get("model"), JOB_MODEL), cwd=PEOPLE / num, system_file=prompt, mcp=mcp,
                   effort=JOB_EFFORT, tools=",".join(("Read", "Write", "Glob", "Grep", *web)),
                   allow=(*web, "mcp__raion", *deny_writes(work)), cwd_dirs=[GLOBAL, SHARED])
+        started = time.time()
         text, err = "", None
         try:
             await b.start()
@@ -2655,6 +2672,7 @@ async def run_job(num, job, late=False, sample=False):
     else:
         # each file once, as last built, copied out of outbox/ so a later build can't change an update still waiting
         out = _jdir(num) / "files" / f"{datetime.now():%Y-%m-%d_%H%M}_{job['id']}"
+        built += [p for p in work.glob("*.mp4") if p.stat().st_mtime >= started]  # videos its code made this run
         for p in dict.fromkeys(built):
             if p.exists() and p.resolve() not in session(num).unready:
                 out.mkdir(parents=True, exist_ok=True)
