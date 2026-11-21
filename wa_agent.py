@@ -1,7 +1,8 @@
 """WhatsApp message agent: per-number tray, voice notes, one Claude session per number (fresh after idle) that works
 like Claude Code (files, Bash, PowerShell, web) plus Raion's own tools over MCP (send, build, fill, download, print),
 memory (global + per person) kept by a background memory keeper. Messages sent while it works reach it mid-task."""
-import asyncio, base64, collections, hashlib, io, ipaddress, json, mimetypes, os, re, secrets, shutil, socket, sys, time
+import asyncio, base64, collections, hashlib, io, ipaddress, itertools, json, mimetypes, os, re, secrets, shutil, socket, \
+    sys, time
 import urllib.parse, wave, zipfile
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, time as dtime, timedelta
@@ -1457,8 +1458,8 @@ async def send_interactive(to, body: str, choice: dict, header: tuple | None = N
 
 
 async def deliver(s: Session, text: str, voice: bool, deliveries: list, choice: dict | None = None):
-    """Like a person on WhatsApp: the reply rides as the caption of the first file; otherwise it's a plain message.
-    If the model asked for buttons/a list, the reply (with the first file on top, when possible) carries them."""
+    """Like a person on WhatsApp: with one file the reply is its caption; with several, the files go first and the
+    reply after them (never stuck to the first file). Buttons/a list ride on the reply (under a single preview)."""
     text = text.strip()
     if voice and text and SARVAM_KEY:
         try:
@@ -1471,7 +1472,7 @@ async def deliver(s: Session, text: str, voice: bool, deliveries: list, choice: 
             print("voice reply failed, sending text:", repr(e))
     if choice:
         try:
-            first = deliveries[0] if deliveries and deliveries[0][0] in ("image", "document") else None
+            first = deliveries[0] if len(deliveries) == 1 and deliveries[0][0] in ("image", "document") else None
             if first and choice["type"] == "button":  # buttons under the preview: one message
                 await send_interactive(s.num, text, choice, first)
                 deliveries = deliveries[1:]
@@ -1485,11 +1486,22 @@ async def deliver(s: Session, text: str, voice: bool, deliveries: list, choice: 
             return
         except RuntimeError as e:  # WhatsApp rejected the interactive message: fall back to plain
             print("interactive failed, sending plain:", repr(e))
-    if text and (not deliveries or deliveries[0][0] not in ("image", "document") or len(text) > 1000):
-        await send_text(s.num, text)
-        text = ""
+    await _send_all(s.num, text, deliveries)
+
+
+async def _send_all(num, text, deliveries: list):
+    """Files, then the text: one file carries it as its caption. A failure says how many files had gone."""
+    one = len(deliveries) == 1 and deliveries[0][0] in ("image", "document") and len(text) <= 1000
     for i, (kind, path) in enumerate(deliveries):
-        await send_media(s.num, kind, path, text if i == 0 and text else None)
+        try:
+            await send_media(num, kind, path, text if one and text else None)
+        except Exception as e:
+            if not i:  # nothing went: the error as it is (callers tell a closed window by it)
+                raise
+            raise RuntimeError(f"{i} of {len(deliveries)} files sent, then {path.name} failed ({e}); the text "
+                               f"{'went with it' if one else 'was not sent'}") from e
+    if text and not one:
+        await send_text(num, text)
 
 
 # ---------------- Raion's tools (claude CLI -> raion_mcp.py -> tool_api() here) ----------------
@@ -1502,7 +1514,8 @@ S, B, N = {"type": "string"}, {"type": "boolean"}, {"type": "integer"}
 P = {"type": "string", "description": "path in your folder (work/x.html), global/..., or people/<number>/... (admins)"}
 TOOLS = [
     _tool("send_message", "Send a WhatsApp message to the person you are chatting with (only them). Use it for every "
-          "reply, question, heads-up, progress update, preview and file. text rides as the caption of the first file.",
+          "reply, question, heads-up, progress update, preview and file. With one file text is its caption; with "
+          "several, the files go first and text after them.",
           {"text": S, "files": {"type": "array", "items": S, "description": "paths; images show inline, others as documents"},
            "voice": {**B, "description": "speak the text as a voice note: only if they asked for voice, or a quick "
                                          "casual voice chat with nothing to show"},
@@ -1657,9 +1670,14 @@ TOOLS = [
            "phone_column": {**S, "description": "preview: the phone column, for lists that have none set (students)"},
            "preview_id": S, "campaign_id": N},
           ["action"], admin=True),
+    _tool("attach", "Send files that already exist with your message: one in their folder (an earlier poster, a "
+          "received PDF), in global/, or one your code made in your work folder. What you build with the build tools "
+          "goes by itself. Returns every file that will go so far.",
+          {"files": {"type": "array", "items": S, "description": "paths, as for Read"}}, ["files"], admin=True),
 ]
 BUILD_TOOLS = ("make_pdf", "make_image", "make_office", "fill_xlsx", "fill_docx")
-JOB_TOOLS = BUILD_TOOLS + ("schedule",)  # all an automation run gets (schedule: only adding one follow-up)
+JOB_ONLY = ("attach",)  # an automation run's message is its reply; a chat sends files with send_message
+JOB_TOOLS = BUILD_TOOLS + ("schedule", "attach")  # all an automation run gets (schedule: only adding one follow-up)
 SEND_KIND = {".jpg": "image", ".jpeg": "image", ".png": "image", ".mp4": "video"}
 SEND_MAX_MB = {"image": 5, "video": 16}  # WhatsApp's limits; bigger goes as a document (up to 100 MB)
 
@@ -2227,6 +2245,21 @@ async def tool_api() -> str:
     return _api_url
 
 
+def attach(s: Session, a: dict, built: list) -> dict:
+    """An automation run picks files that already exist to go with its message: only from their folder, global/ and
+    shared/ (never elsewhere on the computer: a run reads web pages, which could ask for anything)."""
+    roots = [r.resolve() for r in (s.p, GLOBAL, SHARED)]
+    for f in a.get("files") or []:
+        p = s.resolve(f)
+        if not p.is_file() or not any(p.is_relative_to(r) for r in roots):
+            raise ValueError(f"{f}: only a file in their folder, global/ or shared/")
+        if p in s.unready:
+            raise ValueError(f"{f} still shows template placeholders: fix the HTML and rebuild it first")
+        media_kind(p)  # too big for WhatsApp: said now, not after the run
+        built.append(p)
+    return {"will_go": list(dict.fromkeys(Path(x).resolve().name for x in built))}
+
+
 def _job_ops(job) -> tuple:
     """What a run without a chat may use: automations build and set one follow-up, and one marked for Tally reads it;
     an errand's relay only builds."""
@@ -2248,7 +2281,8 @@ async def _api_tools(req):
     if not s:
         return web.Response(status=403)
     return web.json_response([{k: v for k, v in t.items() if k != "admin"} for t in TOOLS
-                              if (s.admin or not t["admin"]) and (built is None or t["name"] in _job_ops(job))])
+                              if (s.admin or not t["admin"]) and (t["name"] in _job_ops(job) if built is not None
+                                                                    else t["name"] not in JOB_ONLY)])
 
 
 async def _api_call(req):
@@ -2278,6 +2312,10 @@ async def _api_call(req):
             raise PermissionError("an automation run can only read Tally: connecting is done in the chat")
         if job and op == "schedule":
             res, images = await schedule(s, args, parent=job), []
+        elif op in JOB_ONLY:
+            if built is None:
+                raise PermissionError(f"{op} is only for automation runs: send files with send_message")
+            res, images = attach(s, args, built), []
         else:
             res, images = await run_tool(s, op, args)
         # ponytail: only what it builds goes out; the Excel of a long Tally read stays behind, so a run sends figures,
@@ -2309,8 +2347,10 @@ nothing is, reply exactly NOTHING.
 - Your raion tools are called mcp__raion__<name> (mcp__raion__make_pdf, mcp__raion__schedule, ...): use the full name.
 - Files: when the task asks for one (a PDF, an Excel or Word file, slides, an image card), make it with your raion
   tools as the rules below say, writing your own files only in __WORK__ (where they say work/). For a detail the
-  task doesn't give, use the obvious default or a dotted blank. Every file you build goes out with your message
-  (its caption), except builds still showing [placeholders]: build only the final ones.
+  task doesn't give, use the obvious default or a dotted blank. Every file you build goes out with your message,
+  except builds still showing [placeholders]: build only the final ones. Any other file (one already in their
+  folder or global/, or one your code made): mcp__raion__attach. Only those files go: never say a file is
+  attached unless you built or attached it in this run.
 __CODE__
 __TALLY__- Follow-up (strict): ONLY when the task can't be finished now for a reason that changes soon (a result not out yet,
   a reply or decision awaited) and missing it would really matter, you may set ONE one-time follow-up: raion schedule,
@@ -2325,7 +2365,8 @@ __PROFILE__
 JOB_CODE = """- Code: Bash, PowerShell, Python "__PY__" (openpyxl, python-docx, python-pptx, PyMuPDF, PIL). Work only in
   __WORK__; never touch anything outside it but to read. Videos: follow __GLOBAL__/VIDEO.md; its helper runs as
   "__PY__" "__GLOBAL__/tools/video.py" <command>. Every .mp4 you leave in __WORK__ during this run goes out with your
-  message, so leave only the final one (under 16 MB plays inline; up to 100 MB goes as a document).
+  message, so leave only the final one (under 16 MB plays inline; up to 100 MB goes as a document). Anything else
+  your code makes (an image, a PDF, a sheet) goes only if you attach it.
 """
 # only in the run of an automation marked for Tally (it then has the tally tool and no web)
 JOB_TALLY = f"""- Tally: this run reads the office's accounts with mcp__raion__tally (read-only; the tool says how) and has no
@@ -2338,13 +2379,13 @@ JOB_TALLY = f"""- Tally: this run reads the office's accounts with mcp__raion__t
 """
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-MAX_JOBS, MAX_SITES = 10, 10
 JOB_FIELDS = ("task", "time", "days", "date", "sites", "call", "model", "tally", "to")  # what schedule update can change
 MAX_OWN, LOOP_NOTE = 2, 3  # follow-ups Raion sets itself: waiting at once; every this many in a row (each run
 # setting the next), the owner is told even if there's nothing new
 WINDOW_H = 23.5  # WhatsApp allows free messages for 24 h after their last one (a little margin)
 LATE_H = 12  # a run missed while the computer was off still happens if it was due within this many hours
-JOB_LOCK = asyncio.Lock()  # ponytail: one job at a time; jobs due the same minute just queue
+JOB_SEM = asyncio.Semaphore(3)  # ponytail: 3 runs at once on the office computer (videos are heavy); more just queue
+JOB_MINUTES = 60  # one run's limit
 
 
 def _jdir(num) -> Path:
@@ -2518,13 +2559,11 @@ async def schedule(s: Session, a: dict, parent: dict | None = None) -> dict:
             raise ValueError(f"{MAX_OWN} follow-ups you set yourself are already waiting: no more")
     if day and days:  # a date used to win silently: the days were kept but never used
         raise ValueError('once (a date) or repeating (days), not both: pass date "" or days []')
-    if not job and len(jobs) >= MAX_JOBS:
-        raise ValueError(f"at most {MAX_JOBS} automations per person: remove one first")
     jid = job["id"] if job else (("" if own else re.sub(r"[^\w-]", "", str(a.get("id") or ""))) or  # own: a new id
-                                 next(f"j{i}" for i in range(1, 100) if f"j{i}" not in {j["id"] for j in jobs}))
+                                 next(f"j{i}" for i in itertools.count(1) if f"j{i}" not in {j["id"] for j in jobs}))
     if not job and any(j["id"] == jid for j in jobs):
         raise ValueError(f"'{jid}' is already an automation: update changes it, remove deletes it")
-    sites = list(dict.fromkeys(str(u).strip() for u in a.get("sites") or [] if str(u).strip()))[:MAX_SITES]
+    sites = list(dict.fromkeys(str(u).strip() for u in a.get("sites") or [] if str(u).strip()))
     model, tally, given = str(a.get("model") or "").strip().lower(), bool(a.get("tally")), a.get("to") or []
     to = list(dict.fromkeys(re.sub(r"\D", "", str(n)) for n in given))
     if parent is not None:
@@ -2605,7 +2644,7 @@ async def run_job(num, job, late=False, sample=False):
             await notify(num, "⏰ *Reminder:* " + job["task"] + "\n_(call nahi lag paayi, isliye message)_",
                          job=job["id"])
         return
-    async with JOB_LOCK:
+    async with JOB_SEM:
         await emit({"type": "tool", "name": "job", "args": {"id": job["id"], "task": job["task"][:200]}, "num": num})
         task = f"Task: {job['task']}"
         if job["sites"]:
@@ -2621,9 +2660,11 @@ async def run_job(num, job, late=False, sample=False):
                      "is sent for someone. Nothing private from this person's folder goes in unless the task asks.")
         if job.get("tally"):  # given here: the admins' area, where the map is kept, isn't open to a run
             task += "\n\nYour Tally map (where things are in Tally: names, never amounts):\n" + _read(TALLY_MAP)
-        work = _jdir(num) / "work"
-        work.mkdir(exist_ok=True)
-        prompt = RUNTIME / "prompts" / f"job_{num}.md"
+        # its own folder and prompt: runs go in parallel. ponytail: a sample and the scheduled run of one automation
+        # at the same minute would share them
+        work = _jdir(num) / "work" / job["id"]
+        work.mkdir(parents=True, exist_ok=True)
+        prompt = RUNTIME / "prompts" / f"job_{num}_{job['id']}.md"
         prompt.parent.mkdir(parents=True, exist_ok=True)
         prompt.write_text(JOB_PROMPT.replace("__TALLY__", JOB_TALLY if job.get("tally") else "")
                           .replace("__CODE__", "" if job.get("tally") else JOB_CODE)
@@ -2653,10 +2694,12 @@ async def run_job(num, job, late=False, sample=False):
                 async for ev in b.events():
                     if ev.get("type") == "result":
                         return ev
-            ev = await asyncio.wait_for(result(), 1800) or {}
+            ev = await asyncio.wait_for(result(), JOB_MINUTES * 60) or {}
             text = (ev.get("result") or "").strip()
             if ev.get("is_error") or not text:
                 err = text or ev.get("subtype") or "no answer"
+        except asyncio.TimeoutError:
+            err = f"stopped after {JOB_MINUTES} minutes"
         except Exception as e:
             err = repr(e)
         finally:
@@ -2673,10 +2716,10 @@ async def run_job(num, job, late=False, sample=False):
         # each file once, as last built, copied out of outbox/ so a later build can't change an update still waiting
         out = _jdir(num) / "files" / f"{datetime.now():%Y-%m-%d_%H%M}_{job['id']}"
         built += [p for p in work.glob("*.mp4") if p.stat().st_mtime >= started]  # videos its code made this run
-        for p in dict.fromkeys(built):
+        for p in dict.fromkeys(Path(x).resolve() for x in built):
             if p.exists() and p.resolve() not in session(num).unready:
                 out.mkdir(parents=True, exist_ok=True)
-                files.append(Path(shutil.copy2(p, out / p.name)))
+                files.append(Path(shutil.copy2(p, unique(out / p.name))))
         if late:
             text = "_(der se: us samay computer band tha)_\n" + text
     # the people it's for (still using Raion) get what the run wrote: never a failure, a sample or the note below.
@@ -2726,9 +2769,11 @@ async def check_jobs():
 
 
 async def send_update(s: Session, u: dict) -> str:
-    """One automatic update {"text", "files", "job"} to them (text as the first file's caption); returns the note for
+    """One automatic update {"text", "files", "job"} to them (files, then the text); returns the note for
     their chat, naming the automation it came from (so their reply can change that one)."""
     files = [Path(f) for f in u.get("files", []) if Path(f).exists()]
+    if gone := [Path(f).name for f in u.get("files", []) if not Path(f).exists()]:
+        u = {**u, "text": u["text"] + f"\n\n_(ye file nahi mil paayi, isliye nahi gayi: {', '.join(gone)})_"}
     await deliver(s, u["text"], False, [(media_kind(f), f) for f in files])
     src = (f" (from {_who(u['by'])}'s automation {u.get('job')}: only they can change or stop it)" if u.get("by")
            else f" (automation {u['job']})" if u.get("job") else "")
@@ -3058,7 +3103,9 @@ Strict rules
   the admin (every value, which file is which, anything doubtful) and remember: who they are and what they said or
   gave, only their side, never your brief's private parts (the admin's limits, plans or opinions). It's kept for
   later errands with them.
-- They can't help (wrong person, they don't know, they refuse) or something blocks the errand: ask_admin.
+- They can't help (wrong person, they don't know, they refuse) or something blocks the errand: ask_admin. Never
+  ask again after a no. Once you ask_admin, nothing more goes to them until the admin answers, so in that run
+  say first whatever they should hear ("Main <admin> ji se puchh ke aapko batata hoon").
 - pass_on (only when offered below): their message has nothing to do with this errand (their own office work with
   Raion): hand it to their normal Raion chat instead of answering.
 - Nothing needs doing this run ("ok", a thank-you, waiting for the admin's answer): do nothing."""
@@ -3190,11 +3237,7 @@ def _ewindow(p: dict, num) -> bool:
 
 
 async def _esend(num, text, files):
-    if text and (not files or len(text) > 1000 or media_kind(files[0]) not in ("image", "document")):
-        await send_text(num, text)
-        text = ""
-    for i, f in enumerate(files):
-        await send_media(num, media_kind(f), f, text if i == 0 and text else None)
+    await _send_all(num, text, [(media_kind(f), f) for f in files])
 
 
 async def _ering(e, num):
@@ -3526,6 +3569,7 @@ async def _ecall(ctx: dict, op: str, a: dict) -> tuple[dict, list]:
         if ctx["asks"] >= 2:
             raise ValueError("you've asked twice this run: wait for the answer")
         ctx["asks"] += 1
+        p["waiting"] = True  # no more messages to them until the admin answers
         e.setdefault("asks", []).append({"at": datetime.now().isoformat(timespec="seconds"), "num": num, "text": text})
         _ewrite(e)
         _elog(eid, num, "system", f"you asked {e['admin_name']}: {text}")
@@ -3587,6 +3631,9 @@ async def _ecall(ctx: dict, op: str, a: dict) -> tuple[dict, list]:
         ctx["raw"] += ERRAND_RAW.pop((eid, num), [])
         return {"not_sent": "they wrote more while you were working: reply to all of it together",
                 "new": [("Admin: " if x["who"] == "admin" else "Them: ") + x["text"] for x in fresh]}, []
+    if p.get("waiting") and not ctx["asks"]:  # a refusal or a threat goes to the admin once, never round again
+        raise PermissionError(f"you asked {e['admin_name']} about them: nothing more goes to them until the answer "
+                              "comes (ask_admin again if something new happened)")
     if ctx["replies"] >= 4:
         raise ValueError("4 messages this run already: wait for their answer")
     if p.get("sent", 0) >= MAX_ERRAND_SENT:
@@ -3653,6 +3700,16 @@ async def errand_final(eid, why):
                                        for p in e["people"].values()))
 
 
+def _eheard(e: dict, num):
+    """The admin said something for this person: the worker may write again, and messages still waiting for them to
+    reply are dropped (a "ruko" must stop them too); the worker sends again what still applies."""
+    p = e["people"][num]
+    p.pop("waiting", None)
+    if held := p.pop("held", None):
+        _elog(e["id"], num, "system", f"{len(held)} message(s) of yours that were waiting for them to reply were "
+                                      "dropped for the admin's new word: send again only what still applies")
+
+
 async def errand_tool(s: Session, a: dict) -> dict:
     if not s.admin:
         raise PermissionError("errands are only for admins")
@@ -3689,12 +3746,16 @@ async def errand_tool(s: Session, a: dict) -> dict:
             if e["people"].get(num, {}).get("status") != "open":
                 raise ValueError(f"+{num} has no open part in this errand")
             e["asks"] = [x for x in e.get("asks", []) if x["num"] != num]
+            _eheard(e, num)
             _ewrite(e)
             _elog(e["id"], num, "admin", line, trigger=True)
             errand_kick(e["id"], num)
             return {"told": e["people"][num]["name"]}
         e["told"].append({"at": datetime.now().isoformat(timespec="seconds"), "text": line})
         e["asks"] = []
+        for n, p in e["people"].items():
+            if p["status"] == "open":
+                _eheard(e, n)
         _ewrite(e)
         for n, p in e["people"].items():
             if p["status"] == "open":
