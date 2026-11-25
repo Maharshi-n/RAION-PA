@@ -13,6 +13,9 @@ os.environ.update({"WA_DRY_RUN": "1", "ALLOWED_NUMBERS": NUM, "ADMIN_NUMBERS": "
 import app  # noqa: F401  (loads .env)
 import wa_agent as wa
 
+# claude processes never get .env's secrets (Raion itself has them)
+assert os.environ.get("WA_TOKEN") and not {"WA_TOKEN", "ADMIN_NUMBERS"} & (set(wa.ENV) | set(wa.ENV_THINKING))
+
 
 async def main():
     maint = wa.in_maintenance
@@ -281,16 +284,14 @@ async def main():
         wa.SESSIONS.pop(TO, None)
         shutil.rmtree(wa.PEOPLE / TO, ignore_errors=True)
 
-        # memory keeper (old layout: the real memory may be on either): the closing pass gets the cleanup rules and
-        # the size; a pass asked for while one runs waits
-        v2, wa.v2 = wa.v2, lambda: False
+        # memory keeper: the closing pass gets the cleanup rules and the size; a pass asked for while one runs waits
         s.log, s.keeper_from = [("user", "kal meeting")], 0
         kp = wa._keeper_take(s, final=True)
-        assert s.keeper_busy and "Tidy MEMORY.md" in kp and f"first {wa.MEMORY_CHARS}" in kp and "kal meeting" in kp
+        assert s.keeper_busy and "Check MEMORY.md, PROFILE.md and TODO.md" in kp and "kal meeting" in kp
+        assert "__MEMSIZE__" not in kp and f"/{wa.MEMORY_LIMIT[s.admin]:,} characters" in kp
         await wa.keeper(s)
         assert s.keeper_again and wa._keeper_take(s) is None  # nothing new since
         s.keeper_busy = s.keeper_again = False
-        wa.v2 = v2
 
         # errands: an admin's job done through other people; their messages reach only that errand while it's open,
         # and its worker can only message them, look at their files and ask the admin

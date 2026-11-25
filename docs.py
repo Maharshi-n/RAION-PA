@@ -1,6 +1,6 @@
 """File engine: HTML -> PDF/PNG (Edge headless), PDF previews, PPTX/DOCX/XLSX from JSON specs,
 Office -> PDF (installed Office via COM, else LibreOffice), and text extraction so Claude can read Office files."""
-import asyncio, json, re, shutil, subprocess, tempfile, threading
+import asyncio, json, re, shutil, subprocess, tempfile, threading, time
 from pathlib import Path
 
 import pymupdf
@@ -40,9 +40,19 @@ def _fill_placeholders(html: str, global_dir: Path, me_dir: Path, paper=False) -
 
 
 def _edge(args: list, timeout=60):
+    """Edge can exit before its output file is written (Edge 157 on Windows 11: ~1 s later), so wait for the file."""
     EDGE_PROFILE.mkdir(parents=True, exist_ok=True)
     subprocess.run([EDGE, "--headless=new", "--disable-gpu", "--no-first-run", f"--user-data-dir={EDGE_PROFILE}",
                     *args], capture_output=True, timeout=timeout)
+    out = next(Path(a.split("=", 1)[1]) for a in args if a.startswith(("--print-to-pdf=", "--screenshot=")))
+    # ponytail: done = same non-zero size twice 0.3 s apart; a real failure costs 30 s before the caller raises
+    size, end = -1, time.monotonic() + 30
+    while time.monotonic() < end:
+        now = out.stat().st_size if out.exists() else -1
+        if now > 0 and now == size:
+            return
+        size = now
+        time.sleep(0.3)
 
 
 def _staged(html_path: Path, global_dir: Path, me_dir: Path, paper=False) -> Path:

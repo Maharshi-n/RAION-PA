@@ -103,7 +103,18 @@ def deny_reads(path: Path) -> list:
     return [f"Read(//{Path(path).resolve().as_posix().replace(':', '', 1)}/**)"]
 
 
-ENV = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "MAX_THINKING_TOKENS": "0",
+# Secrets stay with Raion: every claude process (and each command it runs) gets this PC's environment minus every
+# name in .env (WhatsApp token, OpenAI/Sarvam keys, app secret, numbers). Its tools get RAION_URL/KEY separately.
+# Claude's own login (ANTHROPIC_*, CLAUDE_CODE_*, e.g. CLAUDE_CODE_OAUTH_TOKEN) is kept: claude can't run without it.
+# ponytail: same Windows user, so a command could still open .env or read other processes' command lines;
+# the full fix is no Bash/PowerShell for staff chats, or staff workers as a separate Windows user
+_DOTENV = Path(__file__).parent / ".env"
+HELD_BACK = {k for line in _DOTENV.read_text(encoding="utf-8-sig").splitlines()
+             if "=" in line and not line.lstrip().startswith("#")
+             and not (k := line.split("=", 1)[0].strip().upper()).startswith(("ANTHROPIC_", "CLAUDE_CODE_"))} \
+    if _DOTENV.exists() else set()
+ENV = {**{k: v for k, v in os.environ.items() if k.upper() not in HELD_BACK},
+       "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "MAX_THINKING_TOKENS": "0",
        "BASH_DEFAULT_TIMEOUT_MS": "600000", "BASH_MAX_TIMEOUT_MS": "3600000"}  # video renders can take minutes
 ENV_THINKING = {k: v for k, v in ENV.items() if k != "MAX_THINKING_TOKENS"}  # for brains given an effort level
 

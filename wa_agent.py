@@ -43,8 +43,7 @@ MODEL = "claude-opus-5-5"  # the chat agent's model (AGENT_MODEL in .env is igno
 EFFORT = "medium"  # low | medium | high: thinking for the chat agent (AGENT_EFFORT in .env is ignored)
 KEEPER_MODEL, KEEPER_EFFORT = os.environ.get("KEEPER_MODEL") or "haiku", "low"  # memory keeper: quick save per reply
 CLOSE_MODEL, CLOSE_EFFORT = os.environ.get("CLOSE_MODEL") or "sonnet", "low"  # its cleanup when a chat closes
-MEMORY_CHARS = 8000  # old layout (until the one-time move): how much of MEMORY.md each chat starts with
-MEMORY_LIMIT = {True: 4000, False: 2500}  # new layout: MEMORY.md of an admin / a staff member (kept under it)
+MEMORY_LIMIT = {True: 4000, False: 2500}  # MEMORY.md of an admin / a staff member (kept under it)
 PROFILE_LIMIT, TODO_SHOWN, DOUBTS_SHOWN = 1000, 20, 5
 EVENTS_CHARS, TOPICS_CHARS = 3000, 1500  # timeline and topic names a chat starts with
 MEMORY_MOVE = True  # the one-time move to the new layout: False = the night only writes memory/MIGRATION_PLAN.md
@@ -863,12 +862,10 @@ SCOPE = {  # the guardrail for code: by trust, not by sandbox (Bash/PowerShell c
           "for anything risky or hard to undo, say what you'll do and wait for their yes.",
 }
 
-MEMFILES = {  # this person's memory in the workspace list: old layout / new layout
-    False: "- MEMORY.md, PROFILE.md, sessions/   this person's memory (a separate memory keeper writes them; read only)",
-    True: "- MEMORY.md, PROFILE.md, TODO.md, ARCHIVE.md, sessions/   this person's memory, written by a separate memory\n"
-          "                     keeper (read only): standing rules, profile, open to-dos, lines moved out of those, and\n"
-          "                     each chat's summary (.md) and full log (.jsonl). topics/: their own topic files.",
-}
+# this person's memory in the workspace list
+MEMFILES = ("- MEMORY.md, PROFILE.md, TODO.md, ARCHIVE.md, sessions/   this person's memory, written by a separate memory\n"
+            "                     keeper (read only): standing rules, profile, open to-dos, lines moved out of those, and\n"
+            "                     each chat's summary (.md) and full log (.jsonl). topics/: their own topic files.")
 MEMORY_RULES = """
 # Memory and topic files
 - What you're given at the start (MEMORY.md, to-dos, the timeline, topic names) are notes from earlier chats, taken
@@ -888,15 +885,13 @@ MEMORY_RULES = """
 """
 
 
-def memory_prompt(admin: bool, new: bool) -> tuple[str, str, str]:
-    """The prompt's memory parts (files line, more files, rules section) for the old or the new layout."""
-    if not new:
-        return MEMFILES[False], "", ""
+def memory_prompt(admin: bool) -> tuple[str, str, str]:
+    """The prompt's memory parts: files line, more files, rules section."""
     more = "\n- __SHARED__/topics/, __SHARED__/past/   the institute's topic files; events over a week old, by month"
     if admin:
         more += ("\n- __ADMIN__/   admins only: their own timeline (EVENTS.md, past/) and topics/ (money, staff matters,"
                  "\n                     discipline, errands, personal)")
-    return MEMFILES[True], more, MEMORY_RULES.replace("__ADMINTOPIC__", ", __ADMIN__/topics/ (admins only: money, staff "
+    return MEMFILES, more, MEMORY_RULES.replace("__ADMINTOPIC__", ", __ADMIN__/topics/ (admins only: money, staff "
                                                       "matters, discipline, errands, personal)" if admin else "")
 
 
@@ -939,30 +934,6 @@ CORRECTIONS = {  # how a correction in chat reaches the fact files
           "know who should answer it.",
 }
 
-KEEPER_PROMPT = r"""You maintain the long-term memory of Raion, the WhatsApp office operator of Maa Narmada Group of
-Institutes. Today is __TODAY__. Below is the newest part of a chat with __WHO__.
-Keep only what will be useful later. If nothing is worth keeping, change nothing.
-
-Where things go:
-1. __SHARED__/EVENTS.md - the institute's timeline, read by everyone. Record anything dated or that others may ask
-   about: events, meetings, PTMs, exams, holidays, deadlines, decisions, and documents issued
-   (date - what - for whom - asked by - file path). One line each, under "## Upcoming" (soonest first) and
-   "## Past" (newest first). Update an entry when the chat changes it (time, class, cancelled) instead of
-   adding a duplicate; move entries whose date has passed to Past; drop Past entries older than ~3 months.
-2. MEMORY.md (this person) - preferences, standing instructions, recurring tasks, pending work. Short bullets;
-   replace outdated lines. Not facts about the institutes (policies, staff, fees, rules): those live in global/.
-3. PROFILE.md (this person) - name, post/role, language, reply preferences. Each fact once.
-4. __GLOBAL_RULE__
-Clashes: when the chat gives a date, time, name, number or instruction that differs from one someone ELSE gave
-(EVENTS.md lines say who asked), don't overwrite theirs: keep both on that line, e.g. "exam 05/11 (Sharma ji) /
-07/11 (Maharshi) - clash, needs confirming". When someone changes their own, just update it.
-__FINAL__
-Use Read/Edit/Write. Finish with one short line saying what changed, or NOTHING.
-
-=== Conversation ===
-__CONVO__
-"""
-# ponytail: KEEPER_PROMPT is the old layout's, used until the one-time move (MEMORY_MOVE); delete it after
 KEEPER_PROMPT_V2 = r"""You maintain the long-term memory of Raion, the WhatsApp office operator of Maa Narmada Group of
 Institutes. Today is __TODAY__. Below is the newest part of a chat with __WHO__.
 Keep only what will be useful later. If nothing is worth keeping, change nothing.
@@ -1056,8 +1027,7 @@ class Session:
         sessions = sorted((self.p / "sessions").glob("*.md"), reverse=True)[:3]
         drafts = [f.relative_to(self.p).as_posix() for f in (self.p / "drafts").glob("*") if f.is_file()]
         index_tail = "\n".join(_read(self.p / "INDEX.md", 100000).splitlines()[-30:])
-        new = v2()
-        files, more, rules = memory_prompt(self.admin, new)
+        files, more, rules = memory_prompt(self.admin)
         prompt = AGENT_PROMPT
         for k, v in (("__MEMFILES__", files), ("__MOREFILES__", more), ("__MEMORY__", rules),
                      ("__CORRECTIONS__", CORRECTIONS[self.admin]), ("__GLOBAL__", GLOBAL), ("__SHARED__", SHARED),
@@ -1083,9 +1053,7 @@ class Session:
                f"\n# {size_line(self.p / 'MEMORY.md', limit)} (notes from earlier chats)",
                _read(self.p / "MEMORY.md", 2 * limit),
                "\n# Open to-dos (TODO.md)", todo_view(self.p),
-               "\n# Topics (big things, one file each: Read the one they mention)", topics_view(self.num, self.admin))
-              if new else ("\n# PROFILE.md", _read(self.p / "PROFILE.md"),
-                           "\n# MEMORY.md", _read(self.p / "MEMORY.md", MEMORY_CHARS))),
+               "\n# Topics (big things, one file each: Read the one they mention)", topics_view(self.num, self.admin))),
             "\n# Institute (global/INSTITUTE.md)", _read(GLOBAL / "INSTITUTE.md"),
             "\n# House style (global/STYLE.md)", _read(GLOBAL / "STYLE.md"),
             "\n# Global files (global/INDEX.md)", _read(GLOBAL / "INDEX.md"),
@@ -3996,37 +3964,25 @@ def _keeper_take(s: Session, final=False) -> str | None:
     # the closing pass reads the whole chat: the quick saves took it all already, and the summary needs it
     convo = "\n\n".join(f"[{r.upper()}]\n{t}" for r, t in (s.log if final else new))[-30000:]
     summary = f"sessions/{s.started:%Y-%m-%d_%H%M}.md"
-    size = len(_read(s.p / "MEMORY.md", 10**7))
-    if v2():
-        todos = sum(1 for x in _bullets(_read(s.p / "TODO.md", 10**7)) if not TODO_DONE.match(x))
-        prompt = (KEEPER_PROMPT_V2
-                  .replace("__MEMSIZE__", size_line(s.p / "MEMORY.md", MEMORY_LIMIT[s.admin]))
-                  .replace("__PROFSIZE__", size_line(s.p / "PROFILE.md", PROFILE_LIMIT))
-                  .replace("__TODOS__", f"{todos} open")
-                  .replace("__TIMELINE__", f"- {SHARED / 'EVENTS.md'}: the institute's timeline, read by everyone's "
-                           f"Raion, staff too.\n   - {ADMIN_MEM / 'EVENTS.md'}: admins only. Money, prices, purchases, "
-                           "salaries, staff matters (hiring, leave, warnings), errands and personal matters go here, "
-                           "never in the shared one." if s.admin else
-                           f"- {SHARED / 'EVENTS.md'}: the institute's timeline, read by everyone. Their own personal "
-                           "matters (their leave, their pay) never go there: keep them in their TODO.md.")
-                  .replace("__TOPICS__", ", ".join(str(d) for d, _ in topic_dirs(s.num, s.admin)))
-                  .replace("__FINAL__", f"This chat is now CLOSED and below is all of it (what's worth keeping is "
-                           f"mostly saved already: don't add it twice). Also:\n- Write a 3-6 line summary to {summary} "
-                           "(what was asked, what was made with file names, anything pending): the one file you "
-                           "create, with Write.\n- Check MEMORY.md, PROFILE.md and TODO.md: merge duplicates, mark "
-                           "finished to-dos done, move pending work or task details that slipped into MEMORY.md to "
-                           "TODO.md (or ARCHIVE.md), most important first. Don't reword lines that are already fine."
-                           if final else ""))
-    else:
-        prompt = (KEEPER_PROMPT.replace("__SHARED__", str(SHARED))
-                  .replace("__FINAL__", f"This chat is now CLOSED and below is all of it (what's worth keeping is "
-                           f"mostly saved already: don't add it twice). Also:\n- Write a 3-6 line summary to {summary} "
-                           "(what was asked, what was made with file names, anything pending).\n- Tidy MEMORY.md and "
-                           "PROFILE.md: delete items that are clearly finished, cancelled or past (if unsure, keep it), "
-                           "merge duplicates, most important things at the top. Compress if you can without losing "
-                           "anything important, but don't reword lines that are already fine. MEMORY.md is now "
-                           f"{size} characters; Raion sees only the first {MEMORY_CHARS} when a chat starts."
-                           if final else ""))
+    todos = sum(1 for x in _bullets(_read(s.p / "TODO.md", 10**7)) if not TODO_DONE.match(x))
+    prompt = (KEEPER_PROMPT_V2
+              .replace("__MEMSIZE__", size_line(s.p / "MEMORY.md", MEMORY_LIMIT[s.admin]))
+              .replace("__PROFSIZE__", size_line(s.p / "PROFILE.md", PROFILE_LIMIT))
+              .replace("__TODOS__", f"{todos} open")
+              .replace("__TIMELINE__", f"- {SHARED / 'EVENTS.md'}: the institute's timeline, read by everyone's "
+                       f"Raion, staff too.\n   - {ADMIN_MEM / 'EVENTS.md'}: admins only. Money, prices, purchases, "
+                       "salaries, staff matters (hiring, leave, warnings), errands and personal matters go here, "
+                       "never in the shared one." if s.admin else
+                       f"- {SHARED / 'EVENTS.md'}: the institute's timeline, read by everyone. Their own personal "
+                       "matters (their leave, their pay) never go there: keep them in their TODO.md.")
+              .replace("__TOPICS__", ", ".join(str(d) for d, _ in topic_dirs(s.num, s.admin)))
+              .replace("__FINAL__", f"This chat is now CLOSED and below is all of it (what's worth keeping is "
+                       f"mostly saved already: don't add it twice). Also:\n- Write a 3-6 line summary to {summary} "
+                       "(what was asked, what was made with file names, anything pending): the one file you "
+                       "create, with Write.\n- Check MEMORY.md, PROFILE.md and TODO.md: merge duplicates, mark "
+                       "finished to-dos done, move pending work or task details that slipped into MEMORY.md to "
+                       "TODO.md (or ARCHIVE.md), most important first. Don't reword lines that are already fine."
+                       if final else ""))
     return (prompt.replace("__TODAY__", f"{datetime.now():%A %d/%m/%Y}")
             .replace("__WHO__", f"{s.name} (+{s.num}), {'an ADMIN' if s.admin else 'a staff member'}")
             .replace("__GLOBAL_RULE__", f"Never edit {GLOBAL} or {SHARED / 'QUESTIONS.md'}: Raion updates the "
@@ -4051,8 +4007,8 @@ async def keeper(s: Session, final=False, prompt=None):
             deny += deny_writes(s.p / d)
         if not s.admin:  # a staff chat never sees or writes the admins' area
             deny += deny_reads(ADMIN_MEM) + deny_writes(ADMIN_MEM)
-        # new layout: quick saves only edit lines (no Write: no file rewritten whole); the closing pass writes its summary
-        tools = "Read,Edit,Glob,Grep" if v2() and not final else "Read,Write,Edit,Glob,Grep"
+        # quick saves only edit lines (no Write: no file rewritten whole); the closing pass writes its summary
+        tools = "Read,Edit,Glob,Grep" if not final else "Read,Write,Edit,Glob,Grep"
         before = _snapshot()
         # prompt goes in on stdin: --disallowedTools takes a variable list and would swallow a trailing argument
         proc = await asyncio.create_subprocess_exec(
