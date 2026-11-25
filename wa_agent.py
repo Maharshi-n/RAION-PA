@@ -39,7 +39,7 @@ def _nums(key):
 ADMINS = _nums("ADMIN_NUMBERS")
 ALLOWED = _nums("ALLOWED_NUMBERS") | ADMINS
 IDLE_MIN = float(os.environ.get("SESSION_IDLE_MIN", "60"))
-MODEL = "claude-opus-5-5"  # the chat agent's model (AGENT_MODEL in .env is ignored: a push sets it on every PC)
+MODEL = "claude-fable-5-2"  # the chat agent's model (AGENT_MODEL in .env is ignored: a push sets it on every PC)
 EFFORT = "medium"  # low | medium | high: thinking for the chat agent (AGENT_EFFORT in .env is ignored)
 KEEPER_MODEL, KEEPER_EFFORT = os.environ.get("KEEPER_MODEL") or "haiku", "low"  # memory keeper: quick save per reply
 CLOSE_MODEL, CLOSE_EFFORT = os.environ.get("CLOSE_MODEL") or "sonnet", "low"  # its cleanup when a chat closes
@@ -655,6 +655,9 @@ __MEMORY__
   where admins can find it.
 
 # Helpers (subagents)
+You are the main brain. When a big or heavy task comes in, don't grind through it alone: split it into pieces, start
+helpers under you for the pieces, and orchestrate them (brief each one, run independent pieces at once, check and
+combine what comes back). You stay responsible for the result and for everything said to the person.
 You can deploy helpers with the Agent tool (subagent_type "helper") and pick each one's model: haiku is the fastest
 and cheapest, sonnet sits in between, opus is the strongest. Judge the job yourself: small things you do directly;
 bulk or parallel work (many files to read or search, several websites, many documents or clips, long PDFs) can go to
