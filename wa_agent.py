@@ -835,6 +835,9 @@ for this.
 Only after they've seen the preview and confirmed printer and copies (max 10). Letterhead documents print on the
 pre-printed letterhead paper (only the text is printed, below the printed header): first tell them to put letterhead
 paper in the printer, and print after they confirm, with paper_loaded true. Paper "plain" prints the full design.
+When an admin asks to connect a printer shared from another office PC: PowerShell Add-Printer -ConnectionName
+\\PC\Share (net view \\PC lists its shares). A driver or access-denied error means someone at this PC has to
+connect it once by hand and approve Windows' admin prompt. Names for printers and the default: the printer tool.
 
 # Buttons
 send_message can add buttons (up to 3) or a list (up to 10) only when tapping is genuinely easier than typing (a
@@ -1101,8 +1104,8 @@ class Session:
                                          .replace("__PY__", sys.executable),
                   # build tools, but never send_message, print, schedule, errand or relay: only Raion talks to people
                   "tools": HELPER_TOOLS + [f"mcp__raion__{t['name']}" for t in TOOLS
-                                           if t["name"] not in ("send_message", "print", "schedule", "errand", "relay",
-                                                                "wait_for_limit")]}
+                                           if t["name"] not in ("send_message", "print", "printer", "schedule",
+                                                                "errand", "relay", "wait_for_limit")]}
         self.brain = Brain(model=MODEL, cwd=self.p, system_file=prompt, mcp=mcp, effort=EFFORT,
                            agents={"helper": helper},
                            tools="Read,Write,Edit,Glob,Grep,Bash,PowerShell,WebSearch,WebFetch,Agent",
@@ -1517,6 +1520,10 @@ TOOLS = [
           {"path": P, "printer": S, "copies": {**N, "default": 1}, "paper": {"enum": ["letterhead", "plain"]},
            "paper_loaded": {**B, "description": "true once they confirmed letterhead paper is in the printer"}},
           ["path"], admin=True),
+    _tool("printer", "Give a printer the name people use for it (\"Rajnikant sir\", \"Office\") and/or make it the "
+          "default. Raion's own setting: Windows isn't changed.",
+          {"printer": {**S, "description": "its Windows name, as in the printers list"},
+           "name": {**S, "description": "the new name; empty removes it"}, "default": B}, ["printer"], admin=True),
     _tool("schedule", "This person's automations: a task you do by yourself at set times and send them the result. "
           "add (a new one; never replaces one), update (change one in place: its id and only the fields that change, "
           "the rest stays), list, remove, run (once now, as a sample).",
@@ -1852,6 +1859,17 @@ async def run_tool(s: Session, op: str, a: dict) -> tuple[dict, list]:
         copies = await docs.run(printing.print_pdf, pdf, printer, int(a.get("copies", 1)), out_file)
         await emit({"type": "print", "num": s.num, "printer": printer, "copies": copies, "file": pdf.name})
         return {"printer": printer, "copies": copies, "paper": paper}, []
+    if op == "printer":
+        if not s.admin:
+            raise PermissionError("printer settings are only for admins")
+        printer, st = printing.find_printer(a["printer"]), printing.load_settings()
+        if "name" in a:
+            st.setdefault("aliases", {})[printer] = str(a["name"]).strip()
+        if a.get("default"):
+            st["default_printer"] = printer
+        printing.save_settings(st)
+        return {"printer": printer, "name": st.get("aliases", {}).get(printer, ""),
+                "default": st.get("default_printer") == printer}, []
     if op == "schedule":
         return await schedule(s, a), []
     if op == "errand":
