@@ -74,7 +74,8 @@ async def main():
     mem.backfill(m, True)
     got = mem.ledger_read(m, "911", ["2026-11", "2099-01"])
     assert [x.get("own") or x.get("text") for x in got if x.get("legacy")] == ["haan bhejo", "Bhej diya"], got
-    paths =wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP  # the memory tests swap in a copy
+    wa.SEARCH_DB = ":memory:"  # recall during the check never reads or writes the live .runtime/search.db
+    paths = wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP  # the memory tests swap in a copy
     s = wa.session(NUM, "check")
     s.key = "k"
     wa.KEYS["k"] = s

@@ -6,7 +6,7 @@ expect: every group must be met by one of its spellings. must_not: none of these
 Frozen questions are never used for tuning: look at their score, never at why they failed.
 
   python eval_memory.py check            the file is well formed and each expected answer is really in its source
-  python eval_memory.py search           free: is a right line in the top 5? Today's grep and stage 1's recall
+  python eval_memory.py search [grep]    free: is a right line in the top 5 of recall? grep: also the old search
   python eval_memory.py answer [ids...]  costs credits, run by hand: a fresh Raion answers, nothing is sent
 Scores go to memory/admin/eval/scores.jsonl; answers to memory/admin/eval/runs/ (private, like the rest of memory/)."""
 import asyncio, json, os, sys, time, unicodedata
@@ -218,7 +218,7 @@ if __name__ == "__main__":
     if cmd == "check":
         sys.exit(1 if check() else 0)
     elif cmd == "search":
-        search()
+        search(("grep", "recall") if "grep" in args else ("recall",))  # grep: the old 10-minute baseline too
     elif cmd == "answer":
         model = next((a.split("=", 1)[1] for a in args if a.startswith("--model=")), wa.MODEL)
         effort = next((a.split("=", 1)[1] for a in args if a.startswith("--effort=")), wa.EFFORT)

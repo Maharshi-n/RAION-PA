@@ -49,10 +49,10 @@ EVENTS_CHARS, TOPICS_CHARS = 3000, 1500  # timeline and topic names a chat start
 MEMORY_MOVE = True  # the one-time move to the new layout: False = the night only writes memory/MIGRATION_PLAN.md
 # memory upgrade (docs: raion-memory-build-spec), one switch per stage; off = how it worked before
 LEDGER = True  # stage 1: every message in and out also goes to memory/ledger/, their own words kept apart
-RECALL = False  # stage 1: Raion gets recall, history and remembered over .runtime/search.db
+RECALL = True  # stage 1: Raion gets recall, history and remembered over .runtime/search.db
 # one-time import of the chats from before the ledger: False = only memory/MIGRATION_LEDGER.md (the plan); True = the
 # night imports them once (memory/MIGRATION_LEDGER_DONE.md) and never again
-LEDGER_BACKFILL = False
+LEDGER_BACKFILL = True
 MAINT_FROM, MAINT_TO = 1, 2  # 01:00-02:00 every night: maintenance (chats off, backup, tidy); nothing runs then
 JOB_MODEL = os.environ.get("JOB_MODEL") or "sonnet"  # scheduled jobs (daily summaries, site checks)
 # what an admin can name for one automation -> what the CLI takes; unnamed, it runs on JOB_MODEL
@@ -1162,6 +1162,7 @@ def session(num, name="") -> Session:
 
 # ---------------- ledger and search index (mem.py; stage 1 of the memory upgrade) ----------------
 _IDX: mem.Index | None = None
+SEARCH_DB = RUNTIME / "search.db"  # check_tools uses ":memory:", so a check never touches the live index
 
 
 def idx() -> mem.Index:
@@ -1171,7 +1172,7 @@ def idx() -> mem.Index:
         if _IDX:
             _IDX.close()
         RUNTIME.mkdir(exist_ok=True)
-        _IDX = mem.Index(RUNTIME / "search.db", MEM, ADMINS)
+        _IDX = mem.Index(SEARCH_DB, MEM, ADMINS)
     return _IDX
 
 
