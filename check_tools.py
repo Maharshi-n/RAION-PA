@@ -13,6 +13,9 @@ os.environ.update({"WA_DRY_RUN": "1", "ALLOWED_NUMBERS": NUM, "ADMIN_NUMBERS": "
 import app  # noqa: F401  (loads .env)
 import wa_agent as wa
 wa.CARDS = wa.RULES = False  # the old paths are checked first; cards and rules on have their own blocks below
+wa.KEEPER_OPS = wa.FACT_TOOL = wa.NIGHT_OPEN = False  # the same for stages 4-6
+wa.LINES_DB, wa.REJECTS = ":memory:", Path(tempfile.mkdtemp()) / "rejects.jsonl"  # never the live ones
+wa.SELF_TEST_LOG = wa.REJECTS.parent / "selftest.jsonl"
 
 # claude processes never get .env's secrets (Raion itself has them)
 assert os.environ.get("WA_TOKEN") and not {"WA_TOKEN", "ADMIN_NUMBERS"} & (set(wa.ENV) | set(wa.ENV_THINKING))
@@ -55,6 +58,10 @@ async def main():
     assert found("क्षा") == [] and found("pariksha") == ["global/INSTITUTE.md:2"]  # no word pieces; Roman finds Hindi
     assert found("school code") == ["global/INSTITUTE.md:3", e["id"]] and found("Sharma niyam") == []
     assert found('"pariksha" OR * NEAR( ) : {') == ["global/INSTITUTE.md:2"]
+    # the night's self-test (stage 6) scores the memory test's questions the way eval_memory.py does
+    assert mem.search_score(i, [{"q": "pariksha kab", "asker": "911", "axis": "carry", "expect": [["05/12/2026"]]},
+                                {"q": "bus", "asker": "911", "axis": "rule", "expect": [["route 7"]]},
+                                {"q": "x", "asker": "911", "axis": "privacy", "expect": []}], lambda n: sc) == 50
     i.close()
     # the one-time import of old chat logs: only their own message, never words in the inbox shown with it, nothing
     # from a turn someone else started, and nothing from after the live ledger began (no message twice)
@@ -130,6 +137,33 @@ async def main():
     assert mem.add_under("# R\n", "Fees", "- c") == "# R\n\n## Fees\n- c\n"
     (m / "r.md").write_text("- a <!--m9-->\n", encoding="utf-8")
     assert mem.next_line_id([m / "r.md", m / "missing.md"]) == "m10"
+    # stage 4: whose words a quote is decided by code (own words, but a forwarded one is an outsider's; then Raion's,
+    # then the inbox); a made-up quote is nobody's; a "haan" says nothing; the same rule in other words is one
+    evs = [{"kind": "in", "own": "aage se letters Hindi me bhejna", "inbox": "Sharma ji: fee list mujhe bhi bhejo"},
+           {"kind": "in", "own": "board meeting 15/12 ko hai", "forwarded": True},
+           {"kind": "out", "text": "Theek hai, kal tak PDF bana dunga"}]
+    assert mem.origin_of("Aage se letters Hindi mein bhejna", evs, "admin")[0] == "admin"  # a near quote is fine
+    assert mem.origin_of("fee list mujhe bhi bhejo", evs, "admin")[0] == "outsider"
+    assert mem.origin_of("board meeting 15/12 ko hai", evs, "staff")[0] == "outsider"
+    assert mem.origin_of("kal tak PDF bana dunga", evs, "admin")[0] == "assistant"
+    assert mem.origin_of("principal sign karenge", evs, "admin") is None
+    assert mem.only_assent("haan theek hai ji") and mem.only_assent("haan Hindi me") and not mem.only_assent("letters Hindi")
+    assert mem.near_same("Letters always in Hindi (M, 01/11/2026) <!--m3-->", "always letters in hindi")
+    assert not mem.near_same("fees 5000", "fees 6000") and not mem.near_same("send fee list", "dont send fee list")
+    assert not mem.near_same("| Principal | Mrs A |", "| Principal | Mrs B |")
+    assert mem.parse_ops('ok ```json\n{"ops": [{"op": "rule"}, 3]}\n```') == [{"op": "rule"}]
+    assert mem.parse_ops("no json") is None and mem.parse_ops('{"ops": 5}') is None
+    # line origins: a row per tagged line; one whose words changed by hand is marked edited, its text left alone
+    ln = mem.Lines(":memory:", m)
+    ln.add("m9", m / "r.md", "- a <!--m9-->", "admin", "911", "aage se a")
+    assert ln.get("m9")["scope"] == "org" and ln.get("m9")["speaker"] == "911" and ln.get("m77") is None
+    (m / "people" / "911" / "MEMORY.md").write_text("- b rule <!--m11-->\n", encoding="utf-8")
+    assert ln.sync([m / "r.md", m / "people" / "911" / "MEMORY.md"], lambda rel, line: rel.split("/")[1]) == ["m11 added"]
+    assert ln.get("m11")["scope"] == "person:911" and ln.get("m11")["speaker"] == "911"
+    (m / "r.md").write_text("- a changed <!--m9-->\n", encoding="utf-8")
+    assert ln.sync([m / "r.md"], lambda rel, line: None) == ["m9 edited"] and ln.get("m9")["status"] == "edited"
+    ln.backup(m / "copy.db")
+    assert mem.Lines(m / "copy.db", m).get("m11")["speaker"] == "911"
     wa.SEARCH_DB = ":memory:"  # recall during the check never reads or writes the live .runtime/search.db
     paths = wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP  # the memory tests swap in a copy
     s = wa.session(NUM, "check")
@@ -815,7 +849,7 @@ async def main():
         async def fake_events(until):
             ran.append("timeline")
 
-        async def fake_backup(wait=False):
+        async def fake_backup(wait=False, weekly=False):
             return True
         cleanup, events, backup = wa.cleanup, wa.cleanup_events, wa.backup_memory
         wa.cleanup, wa.cleanup_events, wa.backup_memory = fake_cleanup, fake_events, fake_backup
@@ -841,7 +875,7 @@ async def main():
         wa.cleanup, wa.cleanup_events, wa.backup_memory = cleanup, events, backup
         runs, reply = [], ["NOTHING"]
 
-        async def fake_once(prompt, cwd, dirs, deny, tools, seconds, num=None, full=False):  # Sonnet, without the model
+        async def fake_once(prompt, cwd, dirs, deny, tools, seconds, num=None, full=False, **kw):  # no model run
             runs.append((prompt, cwd, dirs, deny, tools))
             return reply[0]
         once, wa.claude_once = wa.claude_once, fake_once
@@ -948,6 +982,250 @@ async def main():
         assert wa.consent_of(BOSS, A) == "full" and f"person:{BOSS}" in wa._scopes(ra) and wa.consent_of(A, BOSS) == "none"
         assert "SUPERADMIN: may read every chat" in wa.Session(A, "Maharshi").briefing()
         wa.SUPERADMINS = sup
+        # stage 4: the keeper proposes, code checks and writes. Words from the inbox or a forwarded message never
+        # become the chat owner's rule, a made-up quote is refused, a "haan" to Raion is no rule, the same rule in
+        # other words is written once, a date goes to the timeline code picks, only Raion and the closing pass open
+        # cards, a clash with another admin's line is one doubt (both kept), a run with no JSON leaves its messages
+        wa.KEEPER_OPS = wa.CARDS = True
+        outs, asked = [], []
+
+        async def fake_ops(prompt, cwd, dirs, deny, tools, seconds, num=None, full=False, **kw):  # the model's answers
+            asked.append((prompt, tools, kw))
+            return outs.pop(0) if outs else '{"ops": []}'
+        wa.claude_once = fake_ops
+        k = wa.Session(A, "Maharshi")
+
+        def said(own=None, kind="in", **kw):
+            k.events.append({"id": f"{A}-{len(k.events)}", "at": f"2026-11-26T10:{len(k.events):02d}:00", "kind": kind,
+                             **({"own": own} if own else {}), **kw})
+        said("aage se fee receipts hamesha Hindi me banana", inbox="Sharma ji: staff ko Saturday chhutti do hamesha")
+        said(kind="out", text="Theek hai. PTM har mahine 15 ko rakhun?")
+        said("haan")
+        said("naya rule: bus fees 500 badh gayi sabko batao", forwarded=True)
+        said("annual function 20/12/2026 ko hai parents ko bulana", voice=True)
+        outs.append(json.dumps({"ops": [
+            {"op": "rule", "text": "Fee receipts always in Hindi", "reach": "me", "evidence": "fee receipts hamesha Hindi me banana"},
+            {"op": "rule", "text": "Staff get Saturdays off", "reach": "everyone", "evidence": "staff ko Saturday chhutti do hamesha"},
+            {"op": "rule", "text": "PTM on the 15th every month", "reach": "me", "evidence": "haan"},
+            {"op": "rule", "text": "Bus fees up by 500", "reach": "everyone", "evidence": "bus fees 500 badh gayi"},
+            {"op": "rule", "text": "The principal signs every letter", "evidence": "principal sab letters sign karenge"},
+            {"op": "date", "when": "20/12/2026", "text": "Annual function", "for": "parents", "audience": "institute",
+             "evidence": "annual function 20/12/2026 ko hai"},
+            {"op": "card_open", "title": "Invite parents", "next": "x", "evidence": "parents ko bulana"}]}))
+        await wa.keeper(k)
+        prompt, tools, kw = asked[-1]
+        assert tools == "" and kw["model"] == wa.KEEPER_MODEL and len(prompt) < wa.KEEPER_ROOM, len(prompt)
+        assert "THEIR WORDS: aage se fee receipts" in prompt and "INBOX (other people's words): Sharma" in prompt
+        assert "FORWARDED by them (not their words): naya rule" in prompt and "THEIR WORDS (voice note" in prompt
+        assert k.keeper_from == 5 and not k.keeper_busy
+        mine = (pa / "MEMORY.md").read_text("utf-8")
+        assert re.search(r"- Fee receipts always in Hindi \(Maharshi, \d\d/\d\d/\d{4}\) <!--m\d+-->", mine)
+        everyone = (wa.GLOBAL / "RULES.md").read_text("utf-8")
+        assert "Saturday" not in mine + everyone and "Bus fees" not in mine + everyone and "PTM" not in mine
+        assert "principal" not in mine.lower() and "Invite parents" not in str(list(wa.MEM.rglob("c*.md")))
+        why = [json.loads(x)["why"] for x in wa.REJECTS.read_text("utf-8").splitlines()]
+        assert "outsider" in why[0] and "yes to Raion" in why[1] and "forwarded" in why[2] and "not found" in why[3]
+        assert "open cards" in why[4] and len(why) == 5, why
+        tl = (wa.SHARED / "EVENTS.md").read_text("utf-8")
+        assert re.search(r"## Upcoming\n(- .*\n)*- 20/12/2026 - Annual function \(heard\) - for parents \(Maharshi, ", tl), tl
+        mid = re.search(r"Fee receipts always in Hindi .*<!--(m\d+)-->", mine)[1]
+        row = wa.lines_db().get(mid)
+        assert row["origin"] == "admin" and row["speaker"] == A and row["ledger_id"] == f"{A}-0" and "Hindi" in row["evidence"]
+        assert "keeper: rule m" in (wa.MEM / "CHANGELOG.md").read_text("utf-8")
+        # a date moved by the one who set it: the old line to past/<month>.md, the new one in its place; then cancelled
+        dm = re.search(r"Annual function .*<!--(m\d+)-->", tl)[1]
+        said("annual function ab 22/12/2026 ko hoga")
+        outs.append(json.dumps({"ops": [{"op": "date", "when": "22/12/2026", "text": "Annual function", "replaces": dm,
+                                         "evidence": "annual function ab 22/12/2026 ko hoga"}]}))
+        await wa.keeper(k)
+        tl = (wa.SHARED / "EVENTS.md").read_text("utf-8")
+        assert "20/12/2026 - Annual function" not in tl and "- 22/12/2026 - Annual function (Maharshi" in tl
+        assert "(replaced from EVENTS.md) 20/12/2026 - Annual function" in \
+            (wa.SHARED / "past" / f"{t:%Y-%m}.md").read_text("utf-8") and wa.lines_db().get(dm)["status"] == "replaced"
+        dm = re.search(r"22/12/2026 - Annual function .*<!--(m\d+)-->", tl)[1]
+        said("annual function cancel ho gaya")
+        outs.append(json.dumps({"ops": [{"op": "date_cancel", "id": dm, "evidence": "annual function cancel ho gaya"}]}))
+        await wa.keeper(k)
+        assert "Annual function" not in (wa.SHARED / "EVENTS.md").read_text("utf-8")
+        assert wa.lines_db().get(dm)["status"] == "cancelled"
+        k.keeper_from = len(k.events)
+        said("yaad rakhna fee receipts hamesha Hindi me hi")  # the same rule again, in other words: written once
+        outs.append(json.dumps({"ops": [{"op": "rule", "text": "Always fee receipts in Hindi", "reach": "me",
+                                         "evidence": "fee receipts hamesha Hindi me hi"}]}))
+        await wa.keeper(k)
+        assert (pa / "MEMORY.md").read_text("utf-8").count("receipts") == 1 and k.keeper_from == 8
+        assert f"[{mid}] Fee receipts always in Hindi" in asked[-1][0]  # shown with its id, so it can be replaced
+        said("kal se canteen band")
+        outs += ["not JSON", "still not"]  # twice no JSON: the messages wait for the next run
+        await wa.keeper(k)
+        assert k.keeper_from == 8 and "no usable JSON twice" in wa.REJECTS.read_text("utf-8")
+        await wa.keeper(k)
+        assert k.keeper_from == 9 and "kal se canteen band" in asked[-1][0].split("=== New ===")[-1]
+        n = len(asked)
+        said(kind="in", inbox="Reena ji: letter bhej diya")  # only someone else's words: no model run at all
+        await wa.keeper(k)
+        assert len(asked) == n and k.keeper_from == 10
+        said("ok thanks")  # only a thank-you: nothing to learn yet, it waits for the next span
+        await wa.keeper(k)
+        assert len(asked) == n and k.keeper_from == 10
+        quiet, wa.KEEPER_QUIET = wa.KEEPER_QUIET, 0.05  # after a quiet spell, or at once when many messages wait
+        said("ek baat aur, kal school band rahega")
+        wa.keeper_soon(k)
+        assert k.keeper_timer and len(asked) == n
+        await asyncio.sleep(0.3)
+        assert len(asked) == n + 1 and k.keeper_from == 12 and not k.keeper_timer
+        assert "ok thanks" in asked[-1][0].split("=== New ===")[-1]
+        for i in range(wa.KEEPER_BATCH - 1):  # Raion's replies don't count towards the batch, their messages do
+            said(f"message {i}")
+            said(kind="out", text=f"reply {i}")
+        wa.keeper_soon(k)
+        assert k.keeper_timer and len(asked) == n + 1
+        said("message 9")
+        wa.keeper_soon(k)
+        await asyncio.sleep(0.05)
+        assert len(asked) == n + 2 and k.keeper_from == 12 + 2 * wa.KEEPER_BATCH - 1 and not k.keeper_timer
+        wa.KEEPER_QUIET = quiet
+        # Raion's own saves are shown so they aren't proposed again; cards, topics and doubts from Raion's words too
+        c = wa.card_tool(k, {"action": "open", "title": "DHO letter for the health camp", "for": "DHO", "next": "draft",
+                             "scope": "mine", "evidence": "DHO letter banana", "new": True})
+        cid = re.match(r"\[(c\d+)\]", c["opened"])[1]
+        k.saves.append((len(k.events), "remember (me): reply in short points"))
+        said(kind="out", text="DHO letter ka draft bhej diya, outbox/DHO.pdf")
+        said("theek hai, Udaipur tour ki bus 05/01 ko jayegi; exam 07/12 ko hai na? Sharma ji ne 05/12 bola tha")
+        outs.append(json.dumps({"ops": [
+            {"op": "card_note", "id": cid, "text": "draft sent (outbox/DHO.pdf)", "evidence": "DHO letter ka draft bhej diya"},
+            {"op": "card_status", "id": cid, "status": "done", "evidence": "DHO letter ka draft bhej diya"},
+            {"op": "topic_note", "topic": "Udaipur tour 2026", "text": "bus leaves 05/01/2027",
+             "evidence": "Udaipur tour ki bus 05/01 ko jayegi"},
+            {"op": "doubt", "text": "Exam on 05/12 or 07/12?", "evidence": "exam 07/12 ko hai na"},
+            {"op": "doubt", "text": "Exam on 05/12 or 07/12?", "evidence": "exam 07/12 ko hai na"}]}))
+        await wa.keeper(k)
+        assert "reply in short points" in asked[-1][0].split("# Saved by Raion already")[1]
+        cd = [x for x in wa.MEM.rglob(f"{cid} *.md")][0].read_text("utf-8")
+        assert "draft sent (outbox/DHO.pdf)" in cd and "Status: done" in cd
+        assert "bus leaves 05/01/2027" in (wa.SHARED / "topics" / "Udaipur tour 2026.md").read_text("utf-8")
+        assert (wa.SHARED / "QUESTIONS.md").read_text("utf-8").count("Exam on 05/12 or 07/12?") == 1
+        # a clash: another admin's rule for everyone changed from this chat is kept beside it and asked as a doubt
+        wa.ADMINS.add(BOSS)
+        rb.said = "sab letters par principal ka sign"
+        boss = wa.remember(rb, {"text": "Every letter is signed by the principal", "reach": "everyone", "area": "Letters"})["saved"]
+        said("nahi, letters par director ka sign hoga sabke liye")
+        outs.append(json.dumps({"ops": [{"op": "rule", "text": "Every letter is signed by the director", "reach": "everyone",
+                                         "replaces": boss, "evidence": "letters par director ka sign hoga sabke liye"}]}))
+        await wa.keeper(k)
+        everyone = (wa.GLOBAL / "RULES.md").read_text("utf-8")
+        assert "signed by the principal" in everyone and "signed by the director" in everyone
+        q = (wa.SHARED / "QUESTIONS.md").read_text("utf-8")
+        new = re.search(r"signed by the director .*<!--(m\d+)-->", everyone)[1]
+        assert f"[{boss}, {new}]" in q.split("## Open")[1].split("## ")[0] and "Which stands?" in q
+        assert wa.lines_db().get(boss)["status"] == wa.lines_db().get(new)["status"] == "contested"
+        wa.remember(rb, {"forget": boss})  # settled: the boss cancels theirs; the doubt is answered, the other stands
+        q = (wa.SHARED / "QUESTIONS.md").read_text("utf-8")
+        assert f"[{boss}, {new}]" in q.split("## Done")[1] and f"[{boss}, {new}]" not in q.split("## Done")[0]
+        assert wa.lines_db().get(boss)["status"] == "cancelled" and wa.lines_db().get(new)["status"] == "active"
+        # staff: no admins' timeline, "everyone" waits for an admin
+        st = wa.Session(S, "Sharma ji")
+        st.events = [{"id": "s1", "at": "2026-11-26T11:00:00", "kind": "in", "own": "meri salary 10/12 ko aayegi"},
+                     {"id": "s2", "at": "2026-11-26T11:01:00", "kind": "in", "own": "sab teachers hamesha 8 baje aayenge"}]
+        outs.append(json.dumps({"ops": [
+            {"op": "date", "when": "10/12/2026", "text": "Salary", "audience": "admins", "evidence": "salary 10/12 ko aayegi"},
+            {"op": "rule", "text": "Teachers come at 8", "reach": "everyone", "evidence": "sab teachers hamesha 8 baje aayenge"}]}))
+        await wa.keeper(st)
+        assert "Salary" not in (wa.ADMIN_MEM / "EVENTS.md").read_text("utf-8") + (wa.SHARED / "EVENTS.md").read_text("utf-8")
+        assert "rule for everyone: Teachers come at 8" in (wa.SHARED / "QUESTIONS.md").read_text("utf-8")
+        assert "Teachers come" not in (wa.GLOBAL / "RULES.md").read_text("utf-8")
+        # the close: Sonnet's summary written by code, a card for a request Raion left without one
+        k.started = wa.datetime(2026, 11, 26, 10, 0)
+        outs.append(json.dumps({"summary": "Asked for the DHO letter\nDraft sent", "ops": [
+            {"op": "card_open", "title": "Annual function invitations", "for": "parents", "next": "draft the invite",
+             "scope": "mine", "evidence": "parents ko bulana"}]}))
+        snap = wa._span_take(k, final=True)
+        await wa.keeper(k, final=True, prompt=snap)
+        assert asked[-1][2]["model"] == wa.CLOSE_MODEL and "=== The chat ===" in asked[-1][0]
+        assert (pa / "sessions" / "2026-11-26_1000.md").read_text("utf-8") == "Asked for the DHO letter\nDraft sent\n"
+        assert [f for f in (pa / "cards").glob("c*.md") if "Annual function invitations" in f.read_text("utf-8")]
+        # Raion's own remember is a line with its row, and the same rule in other words is not saved twice
+        k.said = "aage se short points me jawab dena"
+        r = wa.remember(k, {"text": "Reply in short points", "reach": "me"})
+        assert wa.lines_db().get(r["saved"])["evidence"] == "aage se short points me jawab dena"
+        assert wa.remember(k, {"text": "reply in points, short", "reach": "me"})["saved"].startswith("already")
+        # the night: rows for tagged lines written before lines.db (a person's own file is theirs), edited ones marked
+        wa._append(ps / "MEMORY.md", ["- an old staff rule <!--m900-->"])
+        backups, wa.BACKUPS = wa.BACKUPS, Path(tempfile.mkdtemp())  # never the real backups/
+        log = wa.lines_night()
+        assert (wa.BACKUPS / f"lines_{t:%Y%m%d}.db").exists()
+        assert wa.lines_db().get("m900")["speaker"] == S and "line origins" in log[0]
+        (ps / "MEMORY.md").write_text((ps / "MEMORY.md").read_text("utf-8").replace("an old staff rule", "a new staff rule"), "utf-8")
+        wa.lines_night()
+        assert wa.lines_db().get("m900")["status"] == "edited"
+        wa.BACKUPS = backups
+        # stage 5: facts. One line changed (its shape kept, the old one in HISTORY.md, a Done line, its doubt closed);
+        # several matches come back to pick from; a table row stays a row; a new fact goes under its section; another
+        # admin's line is a doubt, not an overwrite; staff never; the README's open questions move once
+        wa.FACT_TOOL = True
+        (wa.GLOBAL / "MNA").mkdir(exist_ok=True)
+        readme = ("# MNA\n## 3. Fees\n- Bus fee 500 per month\n- Admission fee 1000\n\n| Post | Name |\n|---|---|\n"
+                  "| Principal | Mrs A |\n\n## 19. Open questions (contradictions)\n1. Bus fee 500 or 600 a month?\n"
+                  "2. Who signs letters going out?\n   Two templates differ.\n\n## 20. Contacts\n- Office 0000\n")
+        (wa.GLOBAL / "MNA" / "README.md").write_text(readme, "utf-8")
+        (wa.GLOBAL / "INSTITUTE.md").write_text("# Group\n- Office opens at 9:00\n", "utf-8")
+        wa._append(wa.SHARED / "QUESTIONS.md", [])
+        qt = wa.mem.add_under((wa.SHARED / "QUESTIONS.md").read_text("utf-8"), "Open",
+                              "- [MNA] Bus fee: 500 or 600 a month? (README 19.1)")
+        (wa.SHARED / "QUESTIONS.md").write_text(qt, "utf-8")
+        r = wa.fact_tool(ra, {"old": "fee", "new": "x"})
+        assert "fits 3 lines" in r["not_changed"] and len(r["matches"]) == 3  # the open question too
+        assert "fits no line" in wa.fact_tool(ra, {"old": "canteen timing", "new": "x"})["not_changed"]
+        before_lines = (wa.GLOBAL / "MNA" / "README.md").read_text("utf-8").splitlines()
+        r = wa.fact_tool(ra, {"old": "Bus fee 500 per month", "new": "Bus fee 600 per month (from 12/2026)",
+                              "doubt": "Bus fee: 500 or 600"})
+        after_lines = (wa.GLOBAL / "MNA" / "README.md").read_text("utf-8").splitlines()
+        diff = [(a, b) for a, b in zip(before_lines, after_lines) if a != b]
+        assert len(before_lines) == len(after_lines) and len(diff) == 1 and diff[0][0] == "- Bus fee 500 per month"
+        assert re.fullmatch(r"- Bus fee 600 per month \(from 12/2026\) <!--m\d+-->", diff[0][1]) and r["doubts_closed"] == 1
+        assert "Bus fee 500 per month" in (wa.GLOBAL / "MNA" / "HISTORY.md").read_text("utf-8")
+        q = (wa.SHARED / "QUESTIONS.md").read_text("utf-8")
+        assert "Bus fee 500 per month → Bus fee 600 per month" in q.split("## Done")[1] and "README 19.1) · answered" in q
+        assert "(README 19.1)" not in q.split("## Done")[0]
+        assert "already says" in wa.fact_tool(ra, {"old": "Bus fee 600", "new": "Bus fee 600 per month (from 12/2026)"})["saved"]
+        try:
+            wa.fact_tool(ra, {"old": "Principal | Mrs A", "new": "Principal is Mrs B"})
+            raise AssertionError("a table row became a bullet")
+        except ValueError:
+            pass
+        wa.fact_tool(ra, {"old": "Principal | Mrs A", "new": "| Principal | Mrs B |"})
+        assert "\n| Principal | Mrs B |\n" in (wa.GLOBAL / "MNA" / "README.md").read_text("utf-8")
+        r = wa.fact_tool(ra, {"new": "- Library open till 5 PM", "file": "global/MNA/README.md", "section": "## 8. Library"})
+        assert "## 8. Library\n- Library open till 5 PM <!--m" in (wa.GLOBAL / "MNA" / "README.md").read_text("utf-8")
+        rb.said = "bus fee 650 hai"
+        r = wa.fact_tool(rb, {"old": "Bus fee 600", "new": "Bus fee 650 per month"})  # another admin set that line
+        assert "doubt" in r["not_changed"] and "Bus fee 600 per month" in (wa.GLOBAL / "MNA" / "README.md").read_text("utf-8")
+        assert "Bus fee 650 per month" in (wa.SHARED / "QUESTIONS.md").read_text("utf-8").split("## Open")[1]
+        r = wa.fact_tool(ra, {"old": "Bus fee 600", "new": "Bus fee 650 per month"})  # the answer: it goes through
+        assert r["changed"] and r["doubts_closed"] == 1
+        try:
+            wa.fact_tool(rs, {"old": "Bus fee", "new": "x"})
+            raise AssertionError("staff changed a fact")
+        except PermissionError:
+            pass
+        assert "fact with old" in wa.Session(A, "Maharshi").briefing() and "fact with old" not in wa.Session(S, "x").briefing()
+        brain, wa.Brain = wa.Brain, Spy
+        await wa.Session(A, "Maharshi").ensure_brain()
+        assert wa.deny_writes(wa.GLOBAL / "MNA" / "README.md", recursive=False)[0] in Spy.kw["deny"]
+        wa.Brain = brain
+        assert "fact" in [x["name"] for x in wa.TOOLS + [wa.FACT_TOOL_DEF]] and wa.FACT_TOOL_DEF["admin"]
+        assert wa.migrate_doubts(False) == "1 doubts to add" and "## 19. Open questions" in (wa.GLOBAL / "MNA" / "README.md").read_text("utf-8")
+        plan = (wa.MEM / "MIGRATION_DOUBTS.md").read_text("utf-8")
+        assert "already there: Bus fee 500 or 600" in plan and "added: Who signs letters going out? Two templates differ." in plan
+        assert wa.migrate_doubts(True) == "1 doubts added"
+        rd = (wa.GLOBAL / "MNA" / "README.md").read_text("utf-8")
+        assert "Who signs" not in rd and "All open questions are in shared/QUESTIONS.md" in rd and "## 20. Contacts" in rd
+        assert "- [MNA] Who signs letters going out? Two templates differ. (from README 19.2)" in \
+            (wa.SHARED / "QUESTIONS.md").read_text("utf-8").split("## Open")[1].split("## ")[0]
+        assert "Who signs letters going out?" in (wa.GLOBAL / "MNA" / "HISTORY.md").read_text("utf-8")
+        assert wa.migrate_doubts(True) == "0 doubts added"  # once: nothing left in the README
+        wa.ADMINS.discard(BOSS)
+        wa.KEEPER_OPS = wa.CARDS = wa.FACT_TOOL = False
         wa.ADMINS.discard(BOSS)
         wa.RULES, wa.GLOBAL = False, real_global
         wa.claude_once = once
@@ -982,6 +1260,89 @@ async def main():
         await asyncio.sleep(0.05)
         assert got == [("e9", "photo bhejta hoon")] and not wa.HELD.exists()
         wa.errand_of, wa.errand_in = errand_of, errand_in
+        # stage 6: chats stay on at night (no refusal); memory/ is a local git repository committed before and after
+        # the night; a night that makes search worse is undone (its messages kept), the owner told; cards past due
+        # are flagged; the weekly note is made by code
+        wa.NIGHT_OPEN = True
+        wa.in_maintenance = lambda t=None: maint(t) if t else True
+        took, hm, n = [], wa.handle_message, len(wa.SENT)
+
+        async def fake_hm(s2, text, *a, **kw):
+            took.append(text)
+        wa.handle_message = fake_hm
+        await wa.handle_incoming({"from": NUM, "id": "m3", "type": "text", "text": {"body": "raat ko bhi kaam"}})
+        await asyncio.sleep(0.05)
+        assert took == ["raat ko bhi kaam"] and len(wa.SENT) == n  # taken in, nobody told about maintenance
+        wa.handle_message = hm
+        wa.in_maintenance = lambda t=None: maint(t) if t else False
+        backups, wa.BACKUPS = wa.BACKUPS, Path(tempfile.mkdtemp())  # never the real backups/
+        wa.CARDS = True
+        late = wa.mem.card_open(wa.MEM, pa / "cards", "Fee list for the DEO", f"Maharshi (+{A})", "DEO", "send",
+                                "fee list bhejo", people=[A], due=day(-2))
+        assert "OVERDUE" in wa.mem.card_line(late, 300) and f"{late['Id']} (due {day(-2)})" in "".join(wa.tidy())
+        wa.CARDS = False
+        if shutil.which("git"):  # the office computer has git (the watchdog pulls with it)
+            b0 = wa.mem_commit("check: before")
+            assert b0 and (wa.MEM / ".git").is_dir() and "files/" in (wa.MEM / ".gitignore").read_text("utf-8")
+            assert wa.mem_commit("check: nothing new") == b0
+            keep = (pa / "MEMORY.md").read_text("utf-8")
+            lg = wa.MEM / "ledger" / "2099-01" / f"{A}.jsonl"
+            lg.parent.mkdir(parents=True, exist_ok=True)
+
+            def bad_night(busy=()):  # the night's tidy breaks a memory file while a message comes in
+                (pa / "MEMORY.md").write_text(keep + "- a line the night broke\n", "utf-8")
+                with open(lg, "a", encoding="utf-8") as x:
+                    x.write('{"id": "n1", "at": "2099-01-01T01:10:00", "kind": "in", "own": "a night message"}\n')
+                return ["tidied"]
+            scores, tidy, st = [80, 70], wa.tidy, wa.self_test
+            wa.tidy, wa.self_test = bad_night, lambda: scores.pop(0)
+            wa.cleanup, wa.backup_memory = fake_cleanup, fake_backup
+            wa.NIGHT_STAMP.unlink(missing_ok=True)
+            await wa.nightly(until)
+            log = (wa.MEM / "CHANGELOG.md").read_text("utf-8")
+            assert "self-test FAILED: search 80% → 70%: night undone" in log, log[-800:]
+            assert (pa / "MEMORY.md").read_text("utf-8") == keep and "a night message" in lg.read_text("utf-8")
+            assert "fell from 80% to 70%" in wa.SENT[-1]["text"] and wa.SENT[-1]["to"] == A
+            scores[:] = [80, 78]  # a small dip: kept
+            wa.NIGHT_STAMP.unlink()
+            await wa.nightly(until)
+            assert "self-test: search 80% before the night, 78% after: kept" in (wa.MEM / "CHANGELOG.md").read_text("utf-8")
+            assert "a line the night broke" in (pa / "MEMORY.md").read_text("utf-8")
+            # a night with a one-time move: the move has its own commit and stays; only the tidy after it is undone
+
+            def fake_move(go):
+                (pa / "MOVED.md").write_text("moved\n", "utf-8")
+                (wa.MEM / "MIGRATION_DOUBTS_DONE.md").write_text("done\n", "utf-8")
+                return "1 doubts added"
+            kept = (pa / "MEMORY.md").read_text("utf-8")
+            md, wa.migrate_doubts, wa.FACT_TOOL = wa.migrate_doubts, fake_move, True
+            wa.tidy = lambda busy=(): ((pa / "MEMORY.md").write_text(kept + "- broke again\n", "utf-8"), ["tidied"])[1]
+            scores[:] = [80, 81, 70]  # before the move, after it, after the tidy
+            (wa.MEM / "MIGRATION_DOUBTS_DONE.md").unlink(missing_ok=True)
+            wa.NIGHT_STAMP.unlink()
+            await wa.nightly(until)
+            log = (wa.MEM / "CHANGELOG.md").read_text("utf-8")
+            assert "one-time moves committed" in log and "search 80% before them, 81% after" in log
+            assert "self-test FAILED: search 81% → 70%: night undone" in log
+            assert (pa / "MOVED.md").exists() and (wa.MEM / "MIGRATION_DOUBTS_DONE.md").exists()
+            assert (pa / "MEMORY.md").read_text("utf-8") == kept
+            wa.migrate_doubts, wa.FACT_TOOL = md, False
+            wa.tidy, wa.self_test = tidy, st
+            wa.cleanup, wa.backup_memory = cleanup, backup
+            try:
+                old_mem, wa.MEM = wa.MEM, Path(tempfile.mkdtemp())
+                wa._git("status")  # no repository in memory/ yet: never runs (it would reach Raion's own code)
+                raise AssertionError("git ran outside memory/")
+            except RuntimeError:
+                pass
+            finally:
+                wa.MEM = old_mem
+        wa.KEEPER_OPS = True
+        note = wa.weekly_note()
+        assert note.startswith("🗓️ Raion's week") and "Keeper proposals refused by the checks: " in note
+        assert re.search(r"Learned: [1-9]\d* new lines", note), note
+        wa.KEEPER_OPS = wa.NIGHT_OPEN = False
+        wa.BACKUPS = backups
         wa.ADMINS.discard(A)
         wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP = paths
 

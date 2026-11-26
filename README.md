@@ -104,7 +104,7 @@ for ears, brain and voice keeps a call quick, and the office dashboard shows wha
   dates, it keeps both and marks the clash instead of overwriting one.
 - Teach it once and everyone knows. Corrections from staff wait for an admin's okay, and Raion asks a few open
   doubts at a good moment.
-- Every night from 1 to 2 AM: backup, tidy, old events archived, and a log of what changed.
+- Every night from 1 to 2 AM: backup, tidy, old events archived, and a log of what changed (chats stay on).
 - A message log (`memory/ledger/`) keeps every message in and out, with each person's own words kept apart from
   notes and other people's messages. Raion searches it and all memory in Hindi, English or Roman Hinglish
   (`recall`, `history`, `remembered`). Each person's search only shows what they may see, but until staff chats
@@ -115,6 +115,20 @@ for ears, brain and voice keeps a call quick, and the office dashboard shows wha
 - Rules (switch `RULES`): `global/RULES.md` holds rules for everyone and loads in every chat; a person's rules stay
   in their `MEMORY.md` with no size cap. `remember` saves a rule with who set it and when (a staff member's rule for
   everyone waits for an admin). `consent` lets each admin choose how much of their chats another admin may read.
+- The memory keeper only proposes (switch `KEEPER_OPS`): Haiku with no tools reads the new messages after 4 quiet
+  minutes (or 10 of their messages) and returns JSON; code then checks each proposal before writing it. The quote
+  must be in the messages, code decides whose words they were, and only a person's own words become a rule, a
+  profile line or a date (never the inbox, a forwarded message or Raion's own words). The same thing twice is written
+  once, and changing another person's line is a clash: both kept, one doubt. `.runtime/lines.db` keeps who said each
+  tagged line; refused proposals go to `.runtime/keeper_rejects.jsonl`. At the close, Sonnet writes the summary and
+  opens cards Raion forgot.
+- Facts (switch `FACT_TOOL`): admins change an institute fact with the `fact` tool, exactly one line; the old one
+  goes to that institute's `HISTORY.md`, the change is logged in `QUESTIONS.md` and the doubt it answers closes.
+  `QUESTIONS.md` is the one list of doubts (the README open questions move there once).
+- Nights stay open (switch `NIGHT_OPEN`): no message is refused. `memory/` is its own local git repository (text
+  only, never pushed), committed before and after the night's tidy. A self-test (the memory test's search layer)
+  runs before and after; a night that drops it by more than 5 points is undone and the owner told. Full zip weekly,
+  `lines.db` copied nightly. On Sundays the owner gets a short note: what was learned, contested, parked, refused.
 
 ### Photo memory
 - Every photo gets a text card within minutes: what it shows, the date, the text in it, keywords in Hindi and
@@ -223,7 +237,7 @@ the memory is plain files and folders the agent can read, search and fix.
 | [`printing.py`](printing.py) | Silent printing on the office printers |
 | [`raion_mcp.py`](raion_mcp.py) | A tiny MCP server that hands Raion's tools to the agent |
 | [`dashboard.html`](dashboard.html) | The office dashboard |
-| [`mem.py`](mem.py) | Memory logic: the message log, the search index (`.runtime/search.db`, rebuilt from the files) and cards |
+| [`mem.py`](mem.py) | Memory logic: the message log, the search index (`.runtime/search.db`, rebuilt from the files), cards, rules, the checks on the memory keeper's proposals and who said each line (`.runtime/lines.db`) |
 | [`check_tools.py`](check_tools.py) | The self-check that runs before every update |
 | [`eval_memory.py`](eval_memory.py) | The memory test: questions kept on the office PC, search and answer scores |
 | [`setup.ps1`](setup.ps1), [`watchdog.ps1`](watchdog.ps1) | Set up a new PC; keep Raion running and updated |

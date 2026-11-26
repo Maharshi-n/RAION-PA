@@ -2,8 +2,9 @@
 
 Stage 1 of docs (raion-memory-build-spec): the ledger (every message in and out, written by code at once, the
 person's own words kept apart) and a search index over it and the memory files. Files stay the truth: the index,
-.runtime/search.db, is disposable and rebuilt from them. Stage 2: cards, one file per piece of pending work."""
-import difflib, json, math, re, sqlite3, threading, unicodedata
+.runtime/search.db, is disposable and rebuilt from them. Stage 2: cards, one file per piece of pending work.
+Stage 4: where each tagged line came from (.runtime/lines.db) and the checks on the memory keeper's proposals."""
+import difflib, hashlib, json, math, re, sqlite3, threading, unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
@@ -263,6 +264,13 @@ class Index:
                 self.db.execute("INSERT OR REPLACE INTO file VALUES (?,?,?)", (rel, st.st_mtime, st.st_size))
             return n
 
+    def rebuild(self) -> int:
+        """Everything read again (after memory was put back as it was: stage 6's undo)."""
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM doc")
+            self.db.execute("DELETE FROM file")
+        return self.refresh()
+
     def _rel(self, f: Path) -> str:
         return f.resolve().relative_to(self.mem.resolve()).as_posix()
 
@@ -381,6 +389,19 @@ class Index:
                 return False
 
 
+def search_score(index: "Index", questions: list[dict], scopes_of, k=5) -> int | None:
+    """Stage 6's self-test: the share of memory-test questions (eval_memory.py's file) with a right line in the top
+    k, each expected group met by one of its spellings. None without questions."""
+    qs = [q for q in questions if q.get("axis") in ("carry", "rule", "current") and q.get("expect")]
+    if not qs:
+        return None
+    ok = 0
+    for q in qs:
+        got = norm(" ".join(h["text"] for h in index.search(q["q"], scopes_of(q["asker"]), limit=k)))
+        ok += all(any(norm(a) in got for a in group) for group in q["expect"])
+    return round(100 * ok / len(qs))
+
+
 def _quote(w: str) -> str:
     return '"' + w.replace('"', '""') + '"'
 
@@ -456,8 +477,18 @@ def card_sees(c: dict, scope: str, num: str, admin: bool, act=False) -> bool:
     return num in nums(f"{c.get('People')} {c.get('Asked by')}") or act and admin and not scope.startswith("person:")
 
 
+def card_overdue(c: dict, today: date | None = None) -> bool:
+    """Still open and its Due date has passed."""
+    m = DATE.search(c.get("Due") or "")
+    try:
+        return bool(m) and card_open_now(c) and date(int(m[3]), int(m[2]), int(m[1])) < (today or date.today())
+    except ValueError:
+        return False
+
+
 def card_line(c: dict, n=160) -> str:
-    x = f"[{c.get('Id')}] {c['title']} · {c.get('Status') or 'doing'}" + (f" · due {c['Due']}" if c.get("Due") else "") \
+    x = f"[{c.get('Id')}] {c['title']} · {c.get('Status') or 'doing'}" \
+        + (f" · due {c['Due']}{' (OVERDUE)' if card_overdue(c) else ''}" if c.get("Due") else "") \
         + (f" · next: {c['Next']}" if c.get("Next") else "")
     return x if len(x) <= n else x[:n - 1] + "…"
 
@@ -669,3 +700,194 @@ def cards_from_plan(mem: Path, plan: dict, cands: dict, names: dict, now: dateti
             card_write(c)
         out.append(f"- {c['Id']} {c['title']} → {home.relative_to(mem).as_posix()}/ ({len(refs)} old lines)")
     return out
+
+
+# ---------------- stage 4: the keeper's proposals, checked by code (spec 4.7) ----------------
+def norm(text: str) -> str:
+    """NFC, lower case, punctuation gone, spaces collapsed (Hindi vowel signs stay inside words)."""
+    return " ".join(words(text))
+
+
+def quote_in(evidence: str, text: str, near=0.85) -> bool:
+    """The quote is in the text: exactly (after norm), or nearly (the helper tidies Hinglish) for 3 words or more."""
+    e, t = norm(evidence), norm(text or "")
+    if not e or not t:
+        return False
+    if f" {e} " in f" {t} ":
+        return True
+    ew, tw = e.split(), t.split()
+    if len(ew) < 3:
+        return False
+    for n in dict.fromkeys((len(ew), len(ew) - 1, len(ew) + 1)):
+        for i in range(max(len(tw) - n, 0) + 1):
+            m = difflib.SequenceMatcher(None, e, " ".join(tw[i:i + n]))
+            if m.quick_ratio() >= near and m.ratio() >= near:
+                return True
+    return False
+
+
+def event_parts(ev: dict, role: str) -> list[tuple[str, str]]:
+    """(origin, text) of each part of a ledger event. Their own words: their role (admin or staff), but a forwarded
+    message is an outsider's; the inbox: other people's (outsider); automation notes and system lines: document;
+    Raion's replies and notes, and the message of Raion's they replied to: assistant."""
+    k = ev.get("kind")
+    if k == "in":
+        return [("outsider" if ev.get("forwarded") else role, ev.get("own") or ""),
+                ("assistant", ev.get("reply_to") or ""), ("outsider", ev.get("inbox") or ""),
+                ("document", ev.get("notes") or "")]
+    if k in ("out", "note"):
+        return [("document" if ev.get("via") else "assistant", ev.get("text") or "")]
+    return [("document", ev.get("text") or "")]
+
+
+ORIGIN_ORDER = ("admin", "staff", "assistant", "outsider", "document")
+
+
+def origin_of(evidence: str, events: list[dict], role: str) -> tuple[str, dict] | None:
+    """Who said these words, decided by which part of which event held them: their own words first, then Raion's,
+    then the inbox and notes. None: the quote is in none of these events (made up)."""
+    found = [(o, e) for e in events for o, t in event_parts(e, role) if t and quote_in(evidence, t)]
+    return min(found, key=lambda x: ORIGIN_ORDER.index(x[0])) if found else None
+
+
+ASSENT = set("""haan han ha haa haanji ji ok okay okk k yes yeah yep theek thik hai hain sahi done kar karo kardo
+kijiye dijiye do de bilkul acha accha achha hmm hm hn sure right fine good thanks thank you please sir mam madam
+हाँ हां हा जी ठीक है हैं सही बिल्कुल अच्छा करो कर दो दीजिए कीजिए धन्यवाद""".split())
+
+
+def only_assent(evidence: str) -> bool:
+    """A "haan" or "ok" to Raion's own words: under two words that say anything."""
+    return sum(w not in ASSENT and w not in STOP for w in norm(evidence).split()) < 2
+
+
+NEG = {"not", "no", "never", "dont", "don", "nahi", "nahin", "nhi", "mat", "na", "mt", "नहीं", "नही", "मत", "ना", "कभी"}
+FILLER = {"always", "hamesha", "every", "time", "please", "should", "must", "will", "be", "aage", "yaad", "rakhna",
+          "rakho", "hi", "हमेशा", "आगे", "याद", "रखना"}
+
+
+def near_same(a: str, b: str) -> bool:
+    """The same rule or fact said again in other words: the same words in any order, leaving out filler ("always",
+    "hamesha") and a plural "s". Every other word must match, so "fees 5000" / "fees 6000", "Mrs A" / "Mrs B" or
+    "send" / "don't send" are never one. ponytail: word sets, no meaning; two wordings with different words stay two
+    lines (a duplicate is harmless, a lost rule is not)."""
+    if same(a, b):
+        return True
+    keep = lambda t: {w[:-1] if len(w) > 3 and w.endswith("s") and w.isascii() else w for w in words(
+        re.sub(r"\s*\([^()]*\d{1,2}/\d{1,2}/\d{4}\)\s*$", "", TAG.sub("", t)))} - FILLER - (STOP - NEG)
+    ka, kb = keep(a), keep(b)
+    return bool(ka) and ka == kb
+
+
+def parse_ops(out: str | None) -> list[dict] | None:
+    """The helper's JSON ({"ops": [...]}, maybe inside a ```json fence); None when there is no usable JSON."""
+    m = re.search(r"\{.*\}", out or "", re.S)
+    try:
+        ops = json.loads(m[0])["ops"] if m else None
+    except (ValueError, KeyError, TypeError):
+        return None
+    return [o for o in ops if isinstance(o, dict)] if isinstance(ops, list) else None
+
+
+# ---------------- stage 4: line origins, .runtime/lines.db (spec 4.3; copied nightly, rebuildable) ----------------
+LINES_SCHEMA = """CREATE TABLE IF NOT EXISTS line (
+  id INTEGER PRIMARY KEY, file TEXT NOT NULL, hash TEXT NOT NULL,
+  scope TEXT NOT NULL, origin TEXT NOT NULL, speaker TEXT, evidence TEXT, ledger_id TEXT,
+  observed_at TEXT, status TEXT NOT NULL DEFAULT 'active', changed_at TEXT)"""
+LINE_COLS = ("id", "file", "hash", "scope", "origin", "speaker", "evidence", "ledger_id", "observed_at", "status",
+             "changed_at")
+
+
+def line_hash(line: str) -> str:
+    return hashlib.sha1(norm(TAG.sub("", line)).encode()).hexdigest()[:16]
+
+
+def file_scope(rel: str) -> str:
+    """The search scope of a memory file, from where it is (memory/-relative path)."""
+    parts = rel.split("/")
+    if parts[0] == "people" and len(parts) > 1:
+        return f"person:{parts[1]}"
+    return "admins" if parts[0] in ("admin", "contacts") else "org"
+
+
+class Lines:
+    """Who said each tagged line (<!--m12-->), from which words, and whether it still stands. One connection for
+    the server, used from worker threads one at a time."""
+
+    def __init__(self, path, mem: Path):
+        self.path, self.mem, self.lock = str(path), Path(mem), threading.Lock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
+        if self.path != ":memory:":
+            self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=10000")
+        self.db.execute(LINES_SCHEMA)
+
+    def close(self):
+        with self.lock:
+            self.db.close()
+
+    def rel(self, f: Path) -> str:
+        f, root = Path(f).resolve(), self.mem.resolve()
+        return f.relative_to(root).as_posix() if f.is_relative_to(root) else f.as_posix()
+
+    def add(self, mid: str, f: Path, line: str, origin: str, speaker=None, evidence=None, ledger_id=None,
+            status="active"):
+        rel, now = self.rel(f), datetime.now().isoformat(timespec="seconds")
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO line VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            (int(mid.lstrip("m")), rel, line_hash(line), file_scope(rel), origin, speaker,
+                             (evidence or "")[:500] or None, ledger_id, now, status, now))
+
+    def get(self, mid: str) -> dict | None:
+        if not re.fullmatch(r"m\d+", mid or ""):
+            return None
+        with self.lock:
+            r = self.db.execute("SELECT * FROM line WHERE id=?", (int(mid[1:]),)).fetchone()
+        return dict(zip(LINE_COLS, r)) if r else None
+
+    def mark(self, mids, status: str):
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.lock, self.db:
+            self.db.executemany("UPDATE line SET status=?, changed_at=? WHERE id=?",
+                                [(status, now, int(m[1:])) for m in mids if re.fullmatch(r"m\d+", m or "")])
+
+    def rows(self, status=None) -> list[dict]:
+        with self.lock:
+            q = self.db.execute("SELECT * FROM line" + (" WHERE status=?" if status else ""), (status,) if status else ())
+            return [dict(zip(LINE_COLS, r)) for r in q.fetchall()]
+
+    def sync(self, files, speaker_of) -> list[str]:
+        """Night: a row for every tagged line that has none (legacy origin, speaker from speaker_of(rel, line)); a
+        standing line whose words changed is marked edited (its text is left alone); one gone from its file is
+        marked replaced. Returns what changed."""
+        log, seen, read = [], set(), set()
+        for f in map(Path, files):
+            if not f.is_file():
+                continue
+            rel = self.rel(f)
+            read.add(rel)
+            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not (m := TAG.search(line)) or not re.match(r"\s*(?:[-*]|\|)\s", line):
+                    continue
+                row = self.get(m[1])
+                if row and row["file"] != rel:
+                    continue  # a copy in an archive: the row belongs to the file the line was written in
+                seen.add(m[1])
+                if not row:
+                    self.add(m[1], f, line, "legacy", speaker_of(rel, line))
+                    log.append(f"{m[1]} added")
+                elif row["status"] == "active" and row["hash"] != line_hash(line):
+                    self.mark([m[1]], "edited")
+                    log.append(f"{m[1]} edited")
+        gone = [f"m{r['id']}" for r in self.rows("active") if r["file"] in read and f"m{r['id']}" not in seen]
+        self.mark(gone, "replaced")
+        return log + [f"{g} left its file" for g in gone]
+
+    def backup(self, dst: Path):
+        """SQLite's own backup call: a consistent copy while the server keeps using it."""
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        out = sqlite3.connect(str(dst))
+        try:
+            with self.lock:
+                self.db.backup(out)
+        finally:
+            out.close()
