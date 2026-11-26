@@ -130,6 +130,40 @@ def save_usage(ev: dict):
         USAGE.write_text(json.dumps({"at": time.time(), "status": info.get("status"), **w}), encoding="utf-8")
 
 
+# One line per model run (chat turn, keeper pass, job...): the before/after baseline for the memory work.
+# The CLI's own numbers as it reports them: in a long-lived chat `turn` counts its results and `cost` is the CLI's
+# total_cost_usd (the process's running total, as Brain.cost_usd already reads it); `since` is this turn's per-model
+# counts, subagents included, when the CLI gives them.
+USAGE_LOG = USAGE.parent / "usage_log.jsonl"
+
+
+def log_run(ev: dict, kind: str, num=None, model=None):
+    u = ev.get("usage") or {}
+    line = {"at": datetime.now().isoformat(timespec="seconds"), "kind": kind, "num": num, "model": model,
+            "seconds": round((ev.get("duration_ms") or 0) / 1000, 1), "in": u.get("input_tokens"),
+            "out": u.get("output_tokens"), "cache_read": u.get("cache_read_input_tokens"),
+            "cache_write": u.get("cache_creation_input_tokens"), "cost": ev.get("total_cost_usd"),
+            "turn": ev.get("result_index"), "error": bool(ev.get("is_error"))}
+    if ev.get("model_usage_since_last_result"):
+        line["since"] = ev["model_usage_since_last_result"]
+    try:
+        USAGE_LOG.parent.mkdir(exist_ok=True)
+        with open(USAGE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except OSError as e:  # measuring never stops a reply
+        print("usage log:", repr(e))
+
+
+def run_result(out: bytes, kind: str, num=None, model=None) -> dict:
+    """The JSON a `claude -p --output-format json` run printed, logged; {} if it printed none."""
+    try:
+        ev = json.loads(out.decode("utf-8", "replace").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+    log_run(ev, kind, num, model)
+    return ev
+
+
 def usage() -> dict:
     """{"at": when read, "five_hour": (percent left, resets at), "seven_day": (...)}; a window past its reset is full."""
     try:
@@ -147,7 +181,7 @@ def usage() -> dict:
 async def probe_usage():
     """A fresh reading (about $0.001): the smallest run, Haiku with no tools, only for its rate_limit_event."""
     USAGE.parent.mkdir(exist_ok=True)
-    b = Brain(model="haiku", cwd=USAGE.parent, system="Reply with just: OK")
+    b = Brain(model="haiku", cwd=USAGE.parent, system="Reply with just: OK", kind="probe")
     await b.start()
     try:
         await b.send("OK")
@@ -165,8 +199,8 @@ async def probe_usage():
 class Brain:
     """Call brain by default (fast, no tools). The WhatsApp agent passes its own sandbox + system prompt file."""
 
-    def __init__(self, model=None, cwd=CWD, system=SYSTEM, system_file=None, **sandbox):
-        self.proc = None
+    def __init__(self, model=None, cwd=CWD, system=SYSTEM, system_file=None, kind="call", num=None, **sandbox):
+        self.proc, self.kind, self.num = None, kind, num  # kind/num: for the usage log
         self.cost_usd = 0.0  # cumulative, from the CLI's result events
         self.last_id = None
         self.model, self.cwd, self.system, self.system_file, self.sandbox = model or MODEL, cwd, system, system_file, sandbox
@@ -199,6 +233,7 @@ class Brain:
             ev = json.loads(raw)
             if ev.get("type") == "result":
                 self.cost_usd = ev.get("total_cost_usd") or self.cost_usd
+                log_run(ev, self.kind, self.num, self.model)
             elif ev.get("type") == "rate_limit_event":
                 save_usage(ev)
             yield ev
@@ -218,6 +253,7 @@ class Brain:
             ev = json.loads(raw)
             if ev.get("type") == "result":  # usually the previous turn's, arriving ~2s after its answer
                 self.cost_usd = ev.get("total_cost_usd") or self.cost_usd
+                log_run(ev, self.kind, self.num, self.model)
                 if ev.get("is_error"):
                     raise RuntimeError(str(ev.get("result")))
             elif ev.get("type") == "rate_limit_event":

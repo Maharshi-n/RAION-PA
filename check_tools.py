@@ -20,6 +20,22 @@ assert os.environ.get("WA_TOKEN") and not {"WA_TOKEN", "ADMIN_NUMBERS"} & (set(w
 async def main():
     maint = wa.in_maintenance
     wa.in_maintenance = lambda t=None: maint(t) if t else False  # a check run at 1 AM still checks the daytime paths
+    # every model run leaves one usage line (a test file, not the real log); a run that printed no JSON is skipped
+    import brain, eval_memory as ev
+    log, brain.USAGE_LOG = brain.USAGE_LOG, Path(tempfile.mkdtemp()) / "u.jsonl"
+    try:
+        r = brain.run_result(b'{"type":"result","result":"done","duration_ms":1500,"total_cost_usd":0.01,'
+                             b'"usage":{"input_tokens":3,"output_tokens":4,"cache_read_input_tokens":5}}\n',
+                             "keeper", NUM, "haiku")
+        assert r["result"] == "done" and brain.run_result(b"", "keeper") == {}
+        line = json.loads(brain.USAGE_LOG.read_text(encoding="utf-8"))
+        assert line["kind"] == "keeper" and line["num"] == NUM and line["seconds"] == 1.5 and line["cache_read"] == 5
+    finally:
+        brain.USAGE_LOG = log
+    # the memory test's matching: case, punctuation and spacing don't count; Hindi words stay whole
+    assert ev.norm("प्राचार्य जी,  Sign!").split() == ["प्राचार्य", "जी", "sign"]
+    assert ev.met("बाहर के पत्र पर — प्राचार्य sign करते हैं", [["प्राचार्य", "Principal"]])
+    assert not ev.met("प्राचार्य", [["प्राचार्य"], ["Principal"]]) and ev.hits("PTM 15/11!", ["ptm 15 11"])
     paths = wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP  # the memory tests swap in a copy
     s = wa.session(NUM, "check")
     s.key = "k"
@@ -725,7 +741,7 @@ async def main():
         wa.cleanup, wa.cleanup_events, wa.backup_memory = cleanup, events, backup
         runs = []
 
-        async def fake_once(prompt, cwd, dirs, deny, tools, seconds):  # the Sonnet runs, without the model
+        async def fake_once(prompt, cwd, dirs, deny, tools, seconds, num=None):  # the Sonnet runs, without the model
             runs.append((prompt, cwd, dirs, deny, tools))
             return "NOTHING"
         once, wa.claude_once = wa.claude_once, fake_once
