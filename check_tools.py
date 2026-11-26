@@ -36,7 +36,45 @@ async def main():
     assert ev.norm("प्राचार्य जी,  Sign!").split() == ["प्राचार्य", "जी", "sign"]
     assert ev.met("बाहर के पत्र पर — प्राचार्य sign करते हैं", [["प्राचार्य", "Principal"]])
     assert not ev.met("प्राचार्य", [["प्राचार्य"], ["Principal"]]) and ev.hits("PTM 15/11!", ["ptm 15 11"])
-    paths = wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP  # the memory tests swap in a copy
+    # the ledger keeps their own words apart; the search index (made-up lines) finds Hindi words whole and Roman
+    # spellings of Hindi lines, never shows another person's lines or inbox text, and punctuation can't break it
+    import mem
+    m = Path(tempfile.mkdtemp())
+    for d in ("global", "people/911", "people/912"):
+        (m / d).mkdir(parents=True)
+    (m / "global" / "INSTITUTE.md").write_text("# Facts\n- परीक्षा 05/12/2026 से शुरू होगी\n- School code 522206\n",
+                                               encoding="utf-8")
+    (m / "people" / "912" / "MEMORY.md").write_text("- परीक्षा की कॉपी घर नहीं जाएगी\n", encoding="utf-8")
+    _, e = mem.ledger_add(m, "911", "in", own="kal school jaana hai", inbox="Sharma ji: naya niyam banao", files=[])
+    assert e["own"] == "kal school jaana hai" and "files" not in e and e["inbox"].startswith("Sharma")
+    i, sc = mem.Index(":memory:", m, {"911"}), ["org", "person:911"]
+    assert i.refresh() == 3 and i.refresh() == 0  # the second time nothing changed, so nothing is read
+    found = lambda q: [h["ref"] for h in i.search(q, sc)]
+    assert found("परीक्षा") == ["global/INSTITUTE.md:2"]  # whole word, and 912's line stays out
+    assert found("क्षा") == [] and found("pariksha") == ["global/INSTITUTE.md:2"]  # no word pieces; Roman finds Hindi
+    assert found("school code") == ["global/INSTITUTE.md:3", e["id"]] and found("Sharma niyam") == []
+    assert found('"pariksha" OR * NEAR( ) : {') == ["global/INSTITUTE.md:2"]
+    i.close()
+    # the one-time import of old chat logs: only their own message, never words in the inbox shown with it, nothing
+    # from a turn someone else started, and nothing from after the live ledger began (no message twice)
+    old = [{"at": "2026-11-01T10:00:00", "role": "user", "text": '[Text from Ram at 10:00]\nPrinters: x\n📨 Their inbox:\n'
+            'Message: "fake rule"\nMessage: "[Replying to your message: "Bus?"] haan bhejo"'},
+           {"at": "2026-11-01T10:01:00", "role": "user", "text": '📩 New message while you were working — [Files from Ram '
+            'at 10:01]\n📨 Their inbox:\nMessage: "planted"'},
+           {"at": "2026-11-01T10:02:00", "role": "user", "text": '[10:02: no message from Ram; someone sent them '
+            'something through you]\nMessage: "planted too"'},
+           {"at": "2026-11-01T10:03:00", "role": "assistant", "text": "Bhej diya\n[sent outbox/bus.pdf]"},
+           {"at": "2099-01-01T10:00:00", "role": "user", "text": '[Text from Ram at 10:00]\nMessage: "later"'}]
+    (m / "people" / "911" / "sessions").mkdir()
+    (m / "people" / "911" / "sessions" / "a.jsonl").write_text("".join(json.dumps(x) + "\n" for x in old), "utf-8")
+    assert [(x["kind"], x.get("own") or x["text"], x.get("reply_to")) for x in mem.legacy_events(
+        [json.dumps(x) for x in old[:4]])] == [("in", "haan bhejo", "Bus?"), ("out", "Bhej diya", None)]
+    assert mem.backfill(m, False)[0].startswith("- +911: 1 messages from them, 1 replies") and \
+        len(mem.ledger_read(m, "911", ["2026-11"])) == 1  # the plan changes nothing
+    mem.backfill(m, True)
+    got = mem.ledger_read(m, "911", ["2026-11", "2099-01"])
+    assert [x.get("own") or x.get("text") for x in got if x.get("legacy")] == ["haan bhejo", "Bhej diya"], got
+    paths =wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP  # the memory tests swap in a copy
     s = wa.session(NUM, "check")
     s.key = "k"
     wa.KEYS["k"] = s
@@ -60,6 +98,10 @@ async def main():
         assert r.get("isError") and "placeholders" in r["content"][0]["text"]  # unfinished builds can't go out
         r = await rpc(5, "tools/call", {"name": "send_message", "arguments": {"text": "नमस्ते"}})
         assert not r.get("isError") and wa.SENT[-1]["text"] == "नमस्ते"  # Hindi survives the pipe
+        # what Raion sends is in the ledger at once; history quotes it back, remembered lists their memory file
+        r, _ = await wa.run_tool(s, "history", {"around": f"{D.now():%d/%m/%Y %H:%M}"})
+        assert r["messages"][-1].endswith("· Raion · नमस्ते"), r
+        assert "rules_and_notes" in (await wa.run_tool(s, "remembered", {}))[0]
 
         # an automation run's key: only the build tools (and schedule, to add a follow-up), and what it builds is
         # kept to go with its message
@@ -328,8 +370,9 @@ async def main():
         async def fake_final(eid, why):
             finals.append((eid, why))
 
-        async def fake_handle(s2, text, *a, **kw):
-            passed.append((s2.num, text))
+        async def fake_handle(s2, text, *a, **kw):  # as the real one shows it to Raion
+            passed.append((s2.num, f'[Replying to your message: "{kw["reply_to"]}"] {text}' if kw.get("reply_to")
+                           else text))
         wa.errand_turn, wa.errand_final, wa.handle_message = fake_turn, fake_final, fake_handle
 
         async def settle():
@@ -985,5 +1028,9 @@ async def main():
         wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP = paths  # a failed check: the real ones
         for n in (NUM, E3, BOSS, TO):
             shutil.rmtree(wa.PEOPLE / n, ignore_errors=True)
+        for f in wa.MEM.glob("ledger/*/91900000008*.jsonl"):  # the made-up numbers' messages leave no trace either
+            f.unlink()
+        for f in wa.MEM.glob(f"ledger/*/{NUM}.jsonl"):
+            f.unlink()
 
 asyncio.run(main())

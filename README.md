@@ -105,6 +105,10 @@ for ears, brain and voice keeps a call quick, and the office dashboard shows wha
 - Teach it once and everyone knows. Corrections from staff wait for an admin's okay, and Raion asks a few open
   doubts at a good moment.
 - Every night from 1 to 2 AM: backup, tidy, old events archived, and a log of what changed.
+- A message log (`memory/ledger/`) keeps every message in and out, with each person's own words kept apart from
+  notes and other people's messages. Raion searches it and all memory in Hindi, English or Roman Hinglish
+  (`recall`, `history`, `remembered`). Each person's search only shows what they may see, but until staff chats
+  are fenced off from the computer this is a correctness filter, not a security wall.
 
 ### Photo memory
 - Every photo gets a text card within minutes: what it shows, the date, the text in it, keywords in Hindi and
@@ -213,7 +217,9 @@ the memory is plain files and folders the agent can read, search and fix.
 | [`printing.py`](printing.py) | Silent printing on the office printers |
 | [`raion_mcp.py`](raion_mcp.py) | A tiny MCP server that hands Raion's tools to the agent |
 | [`dashboard.html`](dashboard.html) | The office dashboard |
+| [`mem.py`](mem.py) | Memory logic: the message log and the search index (`.runtime/search.db`, rebuilt from the files) |
 | [`check_tools.py`](check_tools.py) | The self-check that runs before every update |
+| [`eval_memory.py`](eval_memory.py) | The memory test: questions kept on the office PC, search and answer scores |
 | [`setup.ps1`](setup.ps1), [`watchdog.ps1`](watchdog.ps1) | Set up a new PC; keep Raion running and updated |
 | [`RaionGate/`](RaionGate) | The read-only Tally gate for the accountant's PC |
 | [`docs/`](docs) | The GIFs here: [`gifs.html`](docs/gifs.html) holds their frames, [`render.py`](docs/render.py) makes them |

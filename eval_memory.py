@@ -6,15 +6,16 @@ expect: every group must be met by one of its spellings. must_not: none of these
 Frozen questions are never used for tuning: look at their score, never at why they failed.
 
   python eval_memory.py check            the file is well formed and each expected answer is really in its source
-  python eval_memory.py search           free: is a right line in the top 5 of the search (today: a plain grep)
+  python eval_memory.py search           free: is a right line in the top 5? Today's grep and stage 1's recall
   python eval_memory.py answer [ids...]  costs credits, run by hand: a fresh Raion answers, nothing is sent
 Scores go to memory/admin/eval/scores.jsonl; answers to memory/admin/eval/runs/ (private, like the rest of memory/)."""
-import asyncio, json, os, sys, unicodedata
+import asyncio, json, os, sys, time, unicodedata
 from datetime import datetime
 from pathlib import Path
 
 os.environ.setdefault("WA_DRY_RUN", "1")  # nothing is ever sent from here
 import app  # noqa: F401,E402  (loads .env, as check_tools.py does)
+import mem  # noqa: E402
 import wa_agent as wa  # noqa: E402
 
 EVAL = wa.ADMIN_MEM / "eval"
@@ -60,8 +61,13 @@ def check() -> int:
             why.append("asker has no folder")
         elif q["axis"] in FOUND and not q["expect"]:
             why.append("nothing expected")
-        elif q["axis"] in FOUND and not met(_text(wa.MEM / q["source"]), q["expect"]):
-            why.append(f"expected answer not in {q['source']}")
+        elif q["axis"] in FOUND and not met(_text(src := wa.MEM / q["source"]), q["expect"]):
+            # the night tidy moves lines (MEMORY.md -> ARCHIVE.md): still remembered, only in a sibling file
+            moved = next((f for f in sorted(src.parent.glob("*.md")) if met(_text(f), q["expect"])), None)
+            if moved:
+                print(f"{q['id']}: answer moved to {moved.relative_to(wa.MEM).as_posix()}")
+            else:
+                why.append(f"expected answer not in {q['source']}")
         elif q["axis"] in ("privacy", "attack") and not q["must_not"]:
             why.append("privacy and attack questions need must_not")
         ids.add(q.get("id"))
@@ -117,26 +123,41 @@ def grep(query: str, files: list[Path], k=5) -> list[str]:
     return [line for _, _, line in scored[:k]]
 
 
-def search():
+def search(searchers=("grep", "recall")):
+    """Both searches on the same questions: today's grep (the baseline) and stage 1's recall (a fresh index built
+    in memory here, so the server's .runtime/search.db is never touched)."""
     qs = [q for q in load() if q["axis"] in FOUND and q["expect"]]
-    seen, per = {}, {}
-    for q in qs:
-        files = seen.setdefault(q["asker"], visible(q["asker"]))
-        ok = met("\n".join(grep(q["q"], files)), q["expect"])
-        per.setdefault(q["lang"], []).append(ok)
-        if not ok and not q.get("frozen"):
-            print(f"miss {q['id']} ({q['lang']}): {q['q']}")
-    total = [x for v in per.values() for x in v]
-    score = {lang: round(100 * sum(v) / len(v)) for lang, v in per.items()}
-    score["all"] = round(100 * sum(total) / max(len(total), 1))
-    print(f"search top-5: {score} over {len(total)} questions")
-    _score("search", score, len(total))
+    idx = None
+    if "recall" in searchers:
+        t = time.time()
+        idx = mem.Index(":memory:", wa.MEM, wa.ADMINS)
+        idx.refresh()
+        print(f"index built in {time.time() - t:.1f}s")
+    for name in searchers:
+        seen, per, took = {}, {}, []
+        for q in qs:
+            t = time.time()
+            if name == "grep":
+                found = grep(q["q"], seen.setdefault(q["asker"], visible(q["asker"])))
+            else:
+                found = [h["text"] for h in idx.search(q["q"], wa._scopes(wa.session(q["asker"])), limit=5)]
+            took.append(time.time() - t)
+            ok = met("\n".join(found), q["expect"])
+            per.setdefault(q["lang"], []).append(ok)
+            if not ok and not q.get("frozen"):
+                print(f"{name} miss {q['id']} ({q['lang']}): {q['q']}")
+        total = [x for v in per.values() for x in v]
+        score = {lang: round(100 * sum(v) / len(v)) for lang, v in per.items()}
+        score["all"] = round(100 * sum(total) / max(len(total), 1))
+        ms = sorted(took)[len(took) // 2] * 1000 if took else 0
+        print(f"{name} top-5: {score} over {len(total)} questions, median {ms:.1f} ms")
+        _score("search", score, len(total), searcher=name, median_ms=round(ms, 1))
 
 
 def _score(layer, score, n, **more):
     with open(EVAL / "scores.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps({"at": datetime.now().isoformat(timespec="seconds"), "layer": layer, "score": score,
-                            "n": n, "searcher": "grep", **more}, ensure_ascii=False) + "\n")
+                            "n": n, **{"searcher": "grep", **more}}, ensure_ascii=False) + "\n")
 
 
 async def ask(q: dict, model: str, effort: str) -> str:
@@ -144,8 +165,10 @@ async def ask(q: dict, model: str, effort: str) -> str:
     and never the test itself."""
     s = wa.session(q["asker"])  # no name given: nothing is written to their profile
     prompt = wa.RUNTIME / "prompts" / f"eval_{q['asker']}.md"
-    prompt.parent.mkdir(parents=True, exist_ok=True)
-    prompt.write_text(s.briefing(), encoding="utf-8")
+    if q["asker"] not in _BRIEFED:  # one start prompt per person per run: its "Now" minute would break the cache
+        _BRIEFED.add(q["asker"])
+        prompt.parent.mkdir(parents=True, exist_ok=True)
+        prompt.write_text(s.briefing(), encoding="utf-8")
     b = wa.Brain(model=model, cwd=s.p, system_file=prompt, effort=effort, kind="eval", num=q["asker"],
                  tools="Read,Glob,Grep", cwd_dirs=[wa.GLOBAL, wa.SHARED, *([wa.ADMIN_MEM] if s.admin else [])],
                  deny=[*wa.deny_reads(EVAL), f"Read(//{wa.ROOT.resolve().as_posix().replace(':', '', 1)}/.env)"],
@@ -165,8 +188,11 @@ async def ask(q: dict, model: str, effort: str) -> str:
         await b.close()
 
 
+_BRIEFED = set()
+
+
 async def answer(ids: list, model: str, effort: str):
-    qs = [q for q in load() if not ids or q["id"] in ids]
+    qs = sorted((q for q in load() if not ids or q["id"] in ids), key=lambda q: q["asker"])  # same person back to back
     out = EVAL / "runs" / f"{datetime.now():%Y-%m-%d_%H%M}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     per = {}
