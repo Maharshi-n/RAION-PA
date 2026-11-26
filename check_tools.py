@@ -12,7 +12,7 @@ TO = "919000000085"  # someone an admin's automation sends to
 os.environ.update({"WA_DRY_RUN": "1", "ALLOWED_NUMBERS": NUM, "ADMIN_NUMBERS": ""})
 import app  # noqa: F401  (loads .env)
 import wa_agent as wa
-wa.CARDS = False  # the to-do paths are checked first; cards on has its own block below
+wa.CARDS = wa.RULES = False  # the old paths are checked first; cards and rules on have their own blocks below
 
 # claude processes never get .env's secrets (Raion itself has them)
 assert os.environ.get("WA_TOKEN") and not {"WA_TOKEN", "ADMIN_NUMBERS"} & (set(wa.ENV) | set(wa.ENV_THINKING))
@@ -115,7 +115,21 @@ async def main():
     i = mem.Index(":memory:", m, set())
     i.refresh()
     assert [h["ref"] for h in i.search("signatory", ["org"])] == ["c0001"] and i.search("UDISE", ["org"]) == []
+    # rules (stage 3): a consent of "summary" lets a search see that person's chat summaries and nothing else
+    (m / "people" / "912" / "sessions").mkdir()
+    (m / "people" / "912" / "sessions" / "s.md").write_text("- परीक्षा planning call\n", encoding="utf-8")
+    i.refresh()
+    assert {h["kind"] for h in i.search("परीक्षा", ["person:912|summary"])} == {"summary"}
+    assert len(i.search("परीक्षा", ["person:912"])) == 2
     i.close()
+    assert mem.show_tags("- Letters in Hindi (M, 01/11/2026) <!--m7-->\n- old") == "- [m7] Letters in Hindi (M, 01/11/2026)\n- old"
+    assert mem.same("Letters in Hindi! (M, 01/11/2026) <!--m7-->", "letters in hindi") and not mem.same("a b", "a")
+    assert mem.find_line("# R\n- x <!--m7-->\n- Letters in hindi", "[m7]") == "- x <!--m7-->"
+    assert mem.find_line("- Letters in hindi", "letters in Hindi.") == "- Letters in hindi"
+    assert mem.add_under("# R\n\n## Letters\n- a\n\n## Fees\n- b\n", "Letters", "- c") == "# R\n\n## Letters\n- a\n- c\n\n## Fees\n- b\n"
+    assert mem.add_under("# R\n", "Fees", "- c") == "# R\n\n## Fees\n- c\n"
+    (m / "r.md").write_text("- a <!--m9-->\n", encoding="utf-8")
+    assert mem.next_line_id([m / "r.md", m / "missing.md"]) == "m10"
     wa.SEARCH_DB = ":memory:"  # recall during the check never reads or writes the live .runtime/search.db
     paths = wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP  # the memory tests swap in a copy
     s = wa.session(NUM, "check")
@@ -873,6 +887,69 @@ async def main():
         assert not (pa / "TODO.md").exists() and (pa / "TODO.old.md").exists() and (ps / "TODO.old.md").exists()
         assert len(list((wa.SHARED / "cards").glob("*.md"))) == 1  # only the one Raion opened there
         wa.CARDS = False
+        # rules on: the one-time sort (labels faked; a staff line can't become a rule for everyone, admin lines leave
+        # the profile), rules for everyone in every chat, remember (once only, replaces, forget; staff's "everyone"
+        # waits for an admin), no size cap on rules, and another admin's chats only as far as they allowed
+        wa.RULES, real_global, wa.GLOBAL = True, wa.GLOBAL, wa.MEM / "global"  # never the real global/
+        wa.GLOBAL.mkdir(exist_ok=True)
+        wa._append(pa / "PROFILE.md", ["- Role: ADMIN of the group"])
+        reply[0] = json.dumps({"lines": [{"ref": f"{A}#1", "label": "everyone", "area": "Letters"},
+                                         {"ref": f"{S}#1", "label": "everyone"}]})
+        assert await wa.rules_plan() == "81 lines labelled" and "Letters always in Hindi" in pa.joinpath("MEMORY.md").read_text("utf-8")
+        assert "1 for everyone" in (wa.MEM / "MIGRATION_RULES.md").read_text("utf-8")
+        assert (mr := wa.migrate_rules()) == "1 everyone, 0 skill, 1 me, 0 not a rule", mr  # 80 same lines: one tag
+        rules = (wa.GLOBAL / "RULES.md").read_text("utf-8")
+        assert "## Letters\n- Letters always in Hindi (Maharshi, 20/10/2026) <!--m" in rules
+        assert "Letters always" not in (pa / "MEMORY.md").read_text("utf-8") and "<!--m" in (ps / "MEMORY.md").read_text("utf-8")
+        assert "ADMIN" not in (pa / "PROFILE.md").read_text("utf-8") and "role from code" in (pa / "ARCHIVE.md").read_text("utf-8")
+        bs = wa.Session(S, "Sharma ji").briefing()
+        assert re.search(r"# Rules for everyone \(follow these\)\n# Rules for everyone\n+## Letters\n- \[m\d+\] Letters", bs)
+        assert "are to be followed" in bs and "# Remembering" in bs and "This person's rules (MEMORY.md" in bs
+        assert wa.remember(ra, {"text": "letters always in Hindi", "reach": "everyone"})["saved"].startswith("already")
+        r = wa.remember(ra, {"text": "Fee receipts go to Manoj ji too", "reach": "everyone", "area": "Fees"})
+        assert "## Fees\n- Fee receipts go to Manoj ji too (Maharshi, " in (wa.GLOBAL / "RULES.md").read_text("utf-8")
+        assert "To confirm" in str(wa.remember(rs, {"text": "staff leave on Saturdays", "reach": "everyone"}))
+        assert "staff leave on Saturdays" in (wa.SHARED / "QUESTIONS.md").read_text("utf-8")
+        assert "staff leave" not in (wa.GLOBAL / "RULES.md").read_text("utf-8")
+        mine = wa.remember(rs, {"text": "reply in short points", "reach": "me"})["saved"]
+        wa.remember(rs, {"text": "reply in long paragraphs", "reach": "me", "replaces": mine})
+        sm = (ps / "MEMORY.md").read_text("utf-8")
+        assert "long paragraphs" in sm and "short points" not in sm and "(replaced from MEMORY.md) reply in short" in \
+            (ps / "ARCHIVE.md").read_text("utf-8")
+        try:
+            wa.remember(rs, {"forget": r["saved"]})  # staff can't cancel a rule for everyone
+            raise AssertionError("staff cancelled an everyone rule")
+        except ValueError:
+            pass
+        assert "Fee receipts" in wa.remember(ra, {"forget": r["saved"]})["forgotten"]
+        assert "Fee receipts" in (wa.GLOBAL / "RULES.archive.md").read_text("utf-8")
+        assert any("[m" in x for x in wa.remembered(ra)["rules_for_everyone"])
+        assert wa.needs_cleanup(ps, sunday=True) == []  # 80 rules, past the old cap: not moved out any more
+        await wa.cleanup(S, ["PROFILE.md 90%"], until)
+        assert "MEMORY.md (limit" not in runs[-1][0] and "Bring PROFILE.md down" in runs[-1][0]
+        ka.log, ka.keeper_from = [("user", "kal meeting")], 0
+        assert "No size limit" in wa._keeper_take(ka) and "Never who is an admin" in wa._keeper_take(ka, final=True)
+        wa.ADMINS.add(BOSS)
+        rb = wa.Session(BOSS, "Boss")
+        assert wa.consent_of(BOSS, A) == "none" and f"person:{BOSS}" not in " ".join(wa._scopes(ra))
+        rb.said = "Maharshi meri summary dekh sakta hai"
+        wa.consent_set(rb, {"viewer": A, "chats": "summary"})
+        assert f"person:{BOSS}|summary" in wa._scopes(ra) and wa.consent_of(BOSS, NUM) == "summary"
+        try:
+            await wa.history(ra, {"around": "01/11/2026 10:00", "person": BOSS})
+            raise AssertionError("read another admin's chat without full consent")
+        except PermissionError:
+            pass
+        wa.consent_set(rb, {"viewer": A, "chats": "full"})
+        assert f"person:{BOSS}" in wa._scopes(ra) and "no messages" in (await wa.history(ra, {"around": "01/11/2026 10:00",
+                                                                                          "person": BOSS}))[0]
+        wa.consent_set(rb, {"viewer": A, "chats": "none"})
+        sup, wa.SUPERADMINS = wa.SUPERADMINS, {A}  # the superadmin reads every chat, whatever the consent says
+        assert wa.consent_of(BOSS, A) == "full" and f"person:{BOSS}" in wa._scopes(ra) and wa.consent_of(A, BOSS) == "none"
+        assert "SUPERADMIN: may read every chat" in wa.Session(A, "Maharshi").briefing()
+        wa.SUPERADMINS = sup
+        wa.ADMINS.discard(BOSS)
+        wa.RULES, wa.GLOBAL = False, real_global
         wa.claude_once = once
         # the maintenance hour: nothing set then (an errand's wake moves to 2:00), old automations moved once and
         # their owner told; Raion's people are told once and their message dropped; an errand's people wait till 2

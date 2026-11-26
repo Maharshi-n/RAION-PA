@@ -354,10 +354,12 @@ class Index:
         return hits[:limit]
 
     def _match(self, expr, scopes, since, until, kind):
+        full = [x for x in scopes if not x.endswith("|summary")]  # "person:X|summary": only their chat summaries
+        part = [x[:-8] for x in scopes if x.endswith("|summary")]
         sql = ("SELECT text, keys, scope, origin, at, kind, source, ref, who, bm25(doc) FROM doc WHERE doc MATCH ? "
-               "AND scope IN"
-               f" ({','.join('?' * len(scopes))})")
-        args = [expr, *scopes]
+               f"AND (scope IN ({','.join('?' * len(full))})"
+               + (f" OR scope IN ({','.join('?' * len(part))}) AND kind = 'summary'" if part else "") + ")")
+        args = [expr, *full, *part]
         for cond, v in (("at >= ?", since), ("at <= ?", until), ("kind = ?", kind)):
             if v:
                 sql += f" AND {cond}"
@@ -573,6 +575,50 @@ def card_tidy(mem: Path, today: date | None = None) -> list[str]:
                 f.replace(f.parent / "done" / f.name)
                 log.append(f"card {c['Id']} → done/")
     return log
+
+
+# ---------------- rules (stage 3, spec 4.5): "- <rule> (<who>, dd/mm/yyyy) <!--m12-->" ----------------
+_line_lock = threading.Lock()
+
+
+def next_line_id(files) -> str:
+    """m<n>: one more than the highest tag in these files (archives included, so an id is never reused)."""
+    top = 0
+    for f in files:
+        if Path(f).is_file():
+            top = max([top, *(int(x) for x in re.findall(r"<!--m(\d+)-->", Path(f).read_text(encoding="utf-8")))])
+    return f"m{top + 1}"
+
+
+def same(a: str, b: str) -> bool:
+    """The same words, ignoring case, punctuation, the "(who, date)" part and the tag."""
+    clean = lambda t: words(re.sub(r"\s*\([^()]*\d{1,2}/\d{1,2}/\d{4}\)\s*$", "", TAG.sub("", t)))
+    return clean(a) == clean(b)
+
+
+def show_tags(text: str) -> str:
+    """For a prompt: "- rule (who, date) <!--m12-->" becomes "- [m12] rule (who, date)"."""
+    return re.sub(r"^(\s*[-*]\s+)(.*?)\s*<!--(m\d+)-->\s*$", r"\1[\3] \2", text, flags=re.M)
+
+
+def find_line(text: str, ref: str) -> str | None:
+    """The bullet line with this tag (m12, [m12]) or these same words."""
+    ref = ref.strip().strip("[]")
+    for line in text.splitlines():
+        if re.match(r"\s*[-*]\s", line) and (re.fullmatch(r"m\d+", ref) and f"<!--{ref}-->" in line
+                                             or not re.fullmatch(r"m\d+", ref) and same(line[2:], ref)):
+            return line
+    return None
+
+
+def add_under(text: str, heading: str, line: str) -> str:
+    """The line at the end of the "## heading" section (made at the end of the file when missing)."""
+    m = re.search(rf"^## {re.escape(heading)}[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    if not m:
+        return text.rstrip("\n") + f"\n\n## {heading}\n{line}\n"
+    body = m[1].rstrip("\n")
+    return text[:m.start(1)] + (body + "\n" if body else "") + line + "\n" + ("\n" if m.end(1) < len(text) else "") \
+        + text[m.end(1):].lstrip("\n")
 
 
 # ---------------- one-time move of the old to-dos into cards ----------------

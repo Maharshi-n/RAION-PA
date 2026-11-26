@@ -112,6 +112,9 @@ for ears, brain and voice keeps a call quick, and the office dashboard shows wha
 - Pending work lives on cards (`card` tool; switch `CARDS`): one file per job in `shared/cards/`, `admin/cards/` or
   a person's `cards/`, shared by everyone involved. A chat starts with at most 12 card lines. Sent with no reply
   counts as finished, quiet cards park after 14 days, and the memory keeper no longer writes to-dos.
+- Rules (switch `RULES`): `global/RULES.md` holds rules for everyone and loads in every chat; a person's rules stay
+  in their `MEMORY.md` with no size cap. `remember` saves a rule with who set it and when (a staff member's rule for
+  everyone waits for an admin). `consent` lets each admin choose how much of their chats another admin may read.
 
 ### Photo memory
 - Every photo gets a text card within minutes: what it shows, the date, the text in it, keywords in Hindi and
