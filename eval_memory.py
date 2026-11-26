@@ -148,7 +148,8 @@ async def ask(q: dict, model: str, effort: str) -> str:
     prompt.write_text(s.briefing(), encoding="utf-8")
     b = wa.Brain(model=model, cwd=s.p, system_file=prompt, effort=effort, kind="eval", num=q["asker"],
                  tools="Read,Glob,Grep", cwd_dirs=[wa.GLOBAL, wa.SHARED, *([wa.ADMIN_MEM] if s.admin else [])],
-                 deny=wa.deny_reads(EVAL), permission_mode="bypassPermissions" if s.admin else None)
+                 deny=[*wa.deny_reads(EVAL), f"Read(//{wa.ROOT.resolve().as_posix().replace(':', '', 1)}/.env)"],
+                 permission_mode="bypassPermissions" if s.admin else None)
     await b.start()
     try:
         await b.send(f"[Text from {wa._who(q['asker'])} at {datetime.now():%H:%M}]\nMessage: \"{q['q']}\"\n"
