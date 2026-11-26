@@ -12,6 +12,7 @@ TO = "919000000085"  # someone an admin's automation sends to
 os.environ.update({"WA_DRY_RUN": "1", "ALLOWED_NUMBERS": NUM, "ADMIN_NUMBERS": ""})
 import app  # noqa: F401  (loads .env)
 import wa_agent as wa
+wa.CARDS = False  # the to-do paths are checked first; cards on has its own block below
 
 # claude processes never get .env's secrets (Raion itself has them)
 assert os.environ.get("WA_TOKEN") and not {"WA_TOKEN", "ADMIN_NUMBERS"} & (set(wa.ENV) | set(wa.ENV_THINKING))
@@ -74,6 +75,47 @@ async def main():
     mem.backfill(m, True)
     got = mem.ledger_read(m, "911", ["2026-11", "2099-01"])
     assert [x.get("own") or x.get("text") for x in got if x.get("legacy")] == ["haan bhejo", "Bhej diya"], got
+    # cards (stage 2): ids across all folders, limits, a wait adds who to People, park and reopen move the file, the
+    # night parks a quiet card and files a done one, the chat-start list keeps its order and size, the old to-do
+    # move never puts a card in shared/ and a merged one goes to admin/
+    from datetime import date as Day, timedelta as Td
+    c = mem.card_open(m, m / "shared" / "cards", "DHO letter", "R (+919000000911)", "DHO", "print", "letter do",
+                      people=["919000000911"])
+    assert c["Id"] == "c0001" and mem.card_similar("DHO letter for camp", [c]) and not mem.card_similar("bus", [c])
+    for bad in ({"title": "x" * 81}, {"next_": ""}, {"due": "kal"}):
+        try:
+            mem.card_open(m, m, **{"title": "t", "asked_by": "a", "for_": "", "next_": "n", "evidence": "e", **bad})
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+    mem.card_change(c, "wait", "which signatory", who="M (+919000000912)")
+    assert "919000000912" in c["People"] and mem.card_sees(c, "org", "919000000912", False)
+    assert not mem.card_sees(c, "admins", "919000000912", False) and not mem.card_sees(c, "org", "919000000913", False)
+    mem.card_change(c, "park")
+    assert c["path"].parent.name == "parked" and mem.card_read(c["path"])["Status"].startswith("parked")
+    mem.card_change(c, "reopen")
+    assert c["path"].parent.name == "cards" and len(list(m.rglob("c0001 *"))) == 1
+    many = [mem.card_open(m, m / "people" / "911" / "cards", f"job {k}", "R (+911)", "", "n" * 200, "e")
+            for k in range(14)]
+    os.utime(many[0]["path"], (time.time() - 15 * 86400,) * 2)
+    v = mem.cards_view([mem.card_read(c["path"])] + many[1:], "919000000912", time.time() + 60)
+    assert v.splitlines()[0].startswith("[c0001]") and "+2 more: card list" in v  # waiting on them first
+    assert len(v.splitlines()) == 13 and all(len(x) <= 160 for x in v.splitlines())
+    mem.card_change(many[1], "done", "sent")
+    assert mem.card_tidy(m, Day.today()) == ["card c0002 parked (quiet 14 days)"]
+    assert mem.card_tidy(m, Day.today() + Td(days=8)) == ["card c0003 → done/"] and mem.next_card_id(m) == "c0016"
+    t0 = Day.today()
+    assert mem.todo_candidates(f"- [ ] a (added {t0:%d/%m/%Y})\n- [x] b {t0:%d/%m/%Y}\n- [ ] c (added 01/01/2020)\n"
+                               f"- d {t0 - Td(days=3):%d/%m/%Y}") == [f"a (added {t0:%d/%m/%Y})", f"d {t0 - Td(days=3):%d/%m/%Y}"]
+    made = mem.cards_from_plan(m, {"cards": [{"title": "UDISE", "from": ["911#1", "912#1"], "status": "waiting: x — y"},
+                                             {"title": "one", "from": ["911#2", "999#1", "911#9"]}, {"from": []}]},
+                               {"911": ["a 1", "b 2"], "912": ["c 3"]}, {})
+    assert made[0].endswith("admin/cards/ (2 old lines)") and "people/911/cards/ (1 old lines)" in made[1] and len(made) == 2
+    assert not list((m / "shared" / "cards").glob("c001[67]*"))
+    i = mem.Index(":memory:", m, set())
+    i.refresh()
+    assert [h["ref"] for h in i.search("signatory", ["org"])] == ["c0001"] and i.search("UDISE", ["org"]) == []
+    i.close()
     wa.SEARCH_DB = ":memory:"  # recall during the check never reads or writes the live .runtime/search.db
     paths = wa.MEM, wa.SHARED, wa.ADMIN_MEM, wa.PEOPLE, wa.HELD, wa.NIGHT_STAMP  # the memory tests swap in a copy
     s = wa.session(NUM, "check")
@@ -783,11 +825,11 @@ async def main():
         assert ran == [S, A, "timeline"], ran
         wa.MEMORY_MOVE = move
         wa.cleanup, wa.cleanup_events, wa.backup_memory = cleanup, events, backup
-        runs = []
+        runs, reply = [], ["NOTHING"]
 
-        async def fake_once(prompt, cwd, dirs, deny, tools, seconds, num=None):  # the Sonnet runs, without the model
+        async def fake_once(prompt, cwd, dirs, deny, tools, seconds, num=None, full=False):  # Sonnet, without the model
             runs.append((prompt, cwd, dirs, deny, tools))
-            return "NOTHING"
+            return reply[0]
         once, wa.claude_once = wa.claude_once, fake_once
         await wa.cleanup(S, wa.needs_cleanup(ps), until)
         await wa.cleanup_events(until)
@@ -797,6 +839,40 @@ async def main():
         assert cwe == wa.SHARED and dire == [wa.ADMIN_MEM] and "Write" not in toolse and str(wa.ADMIN_MEM) in pe
         assert wa.deny_writes(wa.SHARED / "QUESTIONS.md", recursive=False)[0] in denye
         assert not re.search(r"__[A-Z_]+__", pr + pe)
+        # cards on: the tool (a similar open card comes back instead of a second one; staff can't use admins), the
+        # list at chat start for who is named on it, prompts without to-dos, and the one-time move of old to-dos
+        wa.CARDS, ra, rs = True, wa.Session(A, "Maharshi"), wa.Session(S, "Sharma ji")
+        o, _ = await wa.run_tool(ra, "card", {"action": "open", "title": "DHO letter for health camp", "for": "DHO",
+                                              "next": "print it", "scope": "institute", "evidence": "DHO letter do",
+                                              "people": [S]})
+        assert o["opened"].startswith("[c0001] DHO letter"), o
+        assert "similar" in wa.card_tool(ra, {"action": "open", "title": "DHO letter", "for": "x", "next": "y",
+                                              "scope": "mine", "evidence": "e"})
+        try:
+            wa.card_tool(rs, {"action": "open", "title": "pay", "next": "y", "scope": "admins", "evidence": "e"})
+            raise AssertionError("staff opened an admins card")
+        except PermissionError:
+            pass
+        assert "waiting: Sharma ji (+" in wa.card_tool(ra, {"action": "wait", "id": "c0001", "who": S, "text": "sign?"})["card"]
+        bs = wa.Session(S, "Sharma ji").briefing()
+        assert "[c0001] DHO letter" in bs.split("# Cards: pending work")[1][:300] and "# Cards (pending work)" in bs
+        assert "TODO.md, ARCHIVE.md" not in bs and "card" in [t["name"] for t in wa.TOOLS + [wa.CARD_TOOL]]
+        assert any(x.startswith("[c0001]") for x in wa.remembered(rs)["open_cards"])
+        ka.log = [("user", "kal meeting")]
+        kp = wa._keeper_take(ka, final=True)
+        assert "TODO" not in kp and "Pending work is not yours" in kp and not re.search(r"__[A-Z_]+__", kp)
+        await wa.cleanup(S, ["x"], until)
+        assert "TODO" not in runs[-1][0] and wa.deny_writes(ps / "cards")[0] in runs[-1][3]
+        wa._append(ps / "TODO.md", [f"- [ ] UDISE check (added {day(-1)})"])
+        assert (cp := wa.cards_plan()) == "3 candidates", cp
+        assert "UDISE check" in (wa.MEM / "MIGRATION_CARDS.md").read_text("utf-8")
+        assert "nothing changed" in await wa.migrate_cards(until) and (pa / "TODO.md").exists()  # no usable answer
+        reply[0] = json.dumps({"cards": [{"title": "UDISE sheet", "next": "fill it", "from": [f"{A}#1", f"{S}#1"]}]})
+        assert await wa.migrate_cards(until) == "1 cards (MIGRATION_CARDS_DONE.md)"
+        assert [f.name for f in (wa.ADMIN_MEM / "cards").glob("*.md")] == ["c0002 UDISE sheet.md"]
+        assert not (pa / "TODO.md").exists() and (pa / "TODO.old.md").exists() and (ps / "TODO.old.md").exists()
+        assert len(list((wa.SHARED / "cards").glob("*.md"))) == 1  # only the one Raion opened there
+        wa.CARDS = False
         wa.claude_once = once
         # the maintenance hour: nothing set then (an errand's wake moves to 2:00), old automations moved once and
         # their owner told; Raion's people are told once and their message dropped; an errand's people wait till 2

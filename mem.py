@@ -2,8 +2,8 @@
 
 Stage 1 of docs (raion-memory-build-spec): the ledger (every message in and out, written by code at once, the
 person's own words kept apart) and a search index over it and the memory files. Files stay the truth: the index,
-.runtime/search.db, is disposable and rebuilt from them."""
-import json, math, re, sqlite3, threading, unicodedata
+.runtime/search.db, is disposable and rebuilt from them. Stage 2: cards, one file per piece of pending work."""
+import difflib, json, math, re, sqlite3, threading, unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
@@ -186,6 +186,7 @@ def sources(mem: Path) -> list[tuple[Path, str, str]]:
                                                  ("TODO.md", "card"), ("TODO.old.md", "card"))]
             out += [(f, sc, "topic") for f in p.glob("topics/**/*.md")] + [(f, sc, "summary") for f in p.glob("sessions/*.md")]
     out += [(f, f"person:{f.stem}", "chat") for f in mem.glob("ledger/*/*.jsonl")]
+    out += [(f, sc, "card") for f, sc in card_files(mem, ("", "done", "parked"))]
     return [x for x in out if x[0].is_file()]
 
 
@@ -256,7 +257,9 @@ class Index:
                     self._chat(f, scope, rel, old[1])
                 else:
                     self._drop(rel)
-                    (self._chat(f, scope, rel, 0) if kind == "chat" else self._md(f, scope, kind, rel))
+                    (self._chat(f, scope, rel, 0) if kind == "chat" else
+                     self._card(f, scope, rel) if CARD_ID.match(f.name) and kind == "card" else
+                     self._md(f, scope, kind, rel))
                 self.db.execute("INSERT OR REPLACE INTO file VALUES (?,?,?)", (rel, st.st_mtime, st.st_size))
             return n
 
@@ -278,6 +281,15 @@ class Index:
             text = TAG.sub("", text)
             at = _iso(text, mtime) if kind == "date" else mtime
             self._add(text, head, scope, "legacy", at, kind, rel, tag[1] if tag else f"{rel}:{n}")
+
+    def _card(self, f: Path, scope, rel):
+        """One row per card: title, status, next and its newest lines; ref = its id."""
+        c = card_read(f)
+        text = " · ".join(x for x in (c["title"], c.get("Status"), c.get("Next") and f"next: {c['Next']}",
+                                      *c["lines"][-5:]) if x)
+        self._add(text, f"{c.get('For') or ''} {c.get('Topic') or ''}".strip(), scope, "legacy",
+                  datetime.fromtimestamp(f.stat().st_mtime).date().isoformat(), "card", rel, c.get("Id") or rel,
+                  (nums(c.get("Asked by")) or [""])[0])
 
     def _chat(self, f: Path, scope, rel, start: int):
         """Their own words and Raion's replies only: inbox quotes, notes and tool lines are not searchable until
@@ -380,3 +392,234 @@ def show(h: dict, names=None) -> str:
     who = (names or {}).get(h["who"], h["who"]) or {"legacy": "notes"}.get(h["origin"], h["origin"])
     text = h["text"] if len(h["text"]) <= 300 else h["text"][:300] + "…"
     return f"[{h['ref']}] {d} · {who} · {text} ({h['source']}){' ~sound' if h.get('sound') else ''}"
+
+
+# ---------------- cards: one file per piece of pending work (stage 2, spec 4.4) ----------------
+CARD_KEYS = ("Id", "Status", "Asked by", "For", "People", "Due", "Next", "Files", "Topic")
+CARD_ID = re.compile(r"^c(\d+)\b")
+_card_lock = threading.Lock()  # one id per card, even with two chats opening at once
+
+
+def nums(text: str) -> list[str]:
+    return re.findall(r"\d{10,13}", text or "")
+
+
+def card_homes(mem: Path) -> list[tuple[Path, str]]:
+    """Each card folder with its search scope: shared = institute, admin = admins only, a person's = theirs only."""
+    pe = mem / "people"
+    return [(mem / "shared" / "cards", "org"), (mem / "admin" / "cards", "admins")] + \
+        [(p / "cards", f"person:{p.name}") for p in (sorted(pe.iterdir()) if pe.is_dir() else []) if p.is_dir()]
+
+
+def card_files(mem: Path, where=("",)) -> list[tuple[Path, str]]:
+    """Card files with their scope; where: "" (open and recently finished), "done", "parked"."""
+    return [(f, sc) for d, sc in card_homes(mem) for sub in where for f in sorted((d / sub).glob("c*.md"))
+            if CARD_ID.match(f.name)]
+
+
+def card_read(f: Path) -> dict:
+    c = {"path": f, "title": "", "lines": []}
+    for line in f.read_text(encoding="utf-8").splitlines():
+        if line.startswith("# ") and not c["title"]:
+            c["title"] = line[2:].strip()
+        elif line.startswith("- "):
+            c["lines"].append(line[2:].strip())
+        elif ":" in line and (k := line.split(":", 1)[0]) in CARD_KEYS:
+            c[k] = line.split(":", 1)[1].strip()
+    return c
+
+
+def card_write(c: dict):
+    c["path"].parent.mkdir(parents=True, exist_ok=True)
+    tmp = c["path"].with_name(c["path"].name + ".tmp")
+    tmp.write_text(f"# {c['title']}\n" + "".join(f"{k}: {c.get(k) or ''}\n" for k in CARD_KEYS) + "\n"
+                   + "".join(f"- {x}\n" for x in c["lines"]), encoding="utf-8")
+    tmp.replace(c["path"])
+
+
+def card_state(c: dict) -> str:
+    """doing, waiting, parked, done or dropped."""
+    return (c.get("Status") or "doing").split()[0].rstrip(":").lower()
+
+
+def card_open_now(c: dict) -> bool:
+    return card_state(c) in ("doing", "waiting")
+
+
+def card_sees(c: dict, scope: str, num: str, admin: bool, act=False) -> bool:
+    """Spec 4.4: their number is in People or Asked by, and they may see the folder. act: admins may also work on
+    any card in the institute's and the admins' folders."""
+    if not (scope == "org" or scope == f"person:{num}" or scope == "admins" and admin):
+        return False
+    return num in nums(f"{c.get('People')} {c.get('Asked by')}") or act and admin and not scope.startswith("person:")
+
+
+def card_line(c: dict, n=160) -> str:
+    x = f"[{c.get('Id')}] {c['title']} · {c.get('Status') or 'doing'}" + (f" · due {c['Due']}" if c.get("Due") else "") \
+        + (f" · next: {c['Next']}" if c.get("Next") else "")
+    return x if len(x) <= n else x[:n - 1] + "…"
+
+
+def _card_words(t: str) -> set:
+    return set(words(t)) - STOP
+
+
+def card_similar(title: str, cards: list[dict]) -> list[dict]:
+    """Open cards whose title looks like this one (mostly the same words, or nearly the same text)."""
+    w = _card_words(title)
+    return [c for c in cards if (ws := _card_words(c["title"])) and w and len(w & ws) / min(len(w), len(ws)) >= 0.6
+            or difflib.SequenceMatcher(None, title.lower(), c["title"].lower()).ratio() >= 0.75]
+
+
+def next_card_id(mem: Path) -> str:
+    top = max((int(CARD_ID.match(f.name)[1]) for f, _ in card_files(mem, ("", "done", "parked"))), default=0)
+    return f"c{top + 1:04d}"
+
+
+def _limit(text, n: int, what: str) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) > n:
+        raise ValueError(f"{what} is {len(text)} characters, at most {n}: longer detail goes in a topic file or the "
+                         "job's STATUS.md, and the card points to it (files, topic)")
+    return text
+
+
+def card_open(mem: Path, home: Path, title: str, asked_by: str, for_: str, next_: str, evidence: str, people=(),
+              due="", files="", topic="", now: datetime | None = None, lines=None) -> dict:
+    now = now or datetime.now()
+    title, next_ = _limit(title, 80, "title"), _limit(next_, 300, "next")
+    if not title or not next_ or not asked_by:
+        raise ValueError("a card needs title, next and who asked")
+    if due and not DATE.fullmatch(due.strip()):
+        raise ValueError("due: dd/mm/yyyy")
+    first = lines or [f"{now:%d/%m %H:%M} opened: {_limit(evidence, 280, 'evidence')}"]
+    with _card_lock:
+        cid = next_card_id(mem)
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title).strip(" .")[:60]
+        c = {"path": home / f"{cid} {name}.md", "title": title, "Id": cid, "Status": "doing", "Asked by": asked_by,
+             "For": for_, "People": ", ".join(f"+{n}" for n in dict.fromkeys(people)), "Due": due.strip(),
+             "Next": next_, "Files": files, "Topic": topic, "lines": first}
+        card_write(c)
+    return c
+
+
+def card_change(c: dict, action: str, text="", who="", now: datetime | None = None) -> dict:
+    """note, wait, next, done, drop, park, reopen: each leaves a dated line; park and reopen move the file."""
+    now = now or datetime.now()
+    text, stamp, day = _limit(text, 280, "text"), f"{now:%d/%m %H:%M}", f"{now:%d/%m/%Y}"
+    if action in ("note", "next", "wait") and not text:
+        raise ValueError(f"{action} needs text")
+    if action == "next":
+        c["Next"] = text
+    elif action == "wait":
+        if not who:
+            raise ValueError("wait needs who (name and number)")
+        c["Status"] = f"waiting: {who} — {text}"
+        have = [x.strip() for x in (c.get("People") or "").split(",") if x.strip()]
+        c["People"] = ", ".join(dict.fromkeys(have + [f"+{n}" for n in nums(who)]))
+    elif action in ("done", "drop", "park"):
+        c["Status"] = {"done": "done", "drop": "dropped", "park": "parked"}[action] + f" {day}"
+    elif action == "reopen":
+        c["Status"] = "doing"
+    elif action != "note":
+        raise ValueError(f"unknown action {action}")
+    said = {"note": text, "next": f"next: {text}", "wait": f"waiting on {who}: {text}"}
+    c["lines"].append(f"{stamp} " + said.get(action, action + (f": {text}" if text else "")))
+    base = c["path"].parent.parent if c["path"].parent.name in ("done", "parked") else c["path"].parent
+    old = c["path"]
+    c["path"] = (base / "parked" if action == "park" else base if action == "reopen" else old.parent) / old.name
+    card_write(c)
+    if c["path"] != old:
+        old.unlink()  # its whole text is in the new file
+    return c
+
+
+def cards_view(cards: list[dict], num: str, since: float, today: date | None = None, n=12) -> str:
+    """At chat start, at most n lines: waiting on them, due within 7 days, changed since their last chat, Raion is
+    doing; the rest counted."""
+    today = today or date.today()
+
+    def due(c):
+        m = DATE.search(c.get("Due") or "")
+        try:
+            return bool(m) and (date(int(m[3]), int(m[2]), int(m[1])) - today).days <= 7
+        except ValueError:
+            return False
+    groups = [lambda c: card_state(c) == "waiting" and num in nums(c["Status"]), due,
+              lambda c: c["path"].stat().st_mtime > since, lambda c: card_state(c) == "doing"]
+    shown = []
+    for g in groups:
+        shown += [c for c in cards if c not in shown and g(c)]
+    out = [card_line(c) for c in shown[:n]]
+    more = len(cards) - len(out)
+    return ("\n".join(out) + (f"\n+{more} more: card list" if more > 0 else "")).strip() or "(none)"
+
+
+def card_tidy(mem: Path, today: date | None = None) -> list[str]:
+    """Night: an open card quiet for 14 days is parked; done and dropped ones go to done/ after 7 days."""
+    today, log = today or date.today(), []
+    for f, _ in card_files(mem):
+        c = card_read(f)
+        if card_open_now(c) and (today - date.fromtimestamp(f.stat().st_mtime)).days >= 14:
+            card_change(c, "park", "no news for 14 days", now=datetime.combine(today, datetime.min.time()))
+            log.append(f"card {c['Id']} parked (quiet 14 days)")
+        elif card_state(c) in ("done", "dropped") and (m := DATE.search(c["Status"])):
+            try:
+                old = (today - date(int(m[3]), int(m[2]), int(m[1]))).days >= 7
+            except ValueError:
+                old = False
+            if old:
+                (f.parent / "done").mkdir(exist_ok=True)
+                f.replace(f.parent / "done" / f.name)
+                log.append(f"card {c['Id']} → done/")
+    return log
+
+
+# ---------------- one-time move of the old to-dos into cards ----------------
+OPEN_TODO = re.compile(r"^\s*[-*]\s+(?!\[[xX]\])(?:\[ \]\s*)?(.+)$")
+
+
+def todo_candidates(text: str, today: date | None = None, days=7) -> list[str]:
+    """Open to-do lines with any date in the last `days` days."""
+    today, out = today or date.today(), []
+    for line in text.splitlines():
+        if not (m := OPEN_TODO.match(line)):
+            continue
+        for d in DATE.finditer(m[1]):
+            try:
+                if 0 <= (today - date(int(d[3]), int(d[2]), int(d[1]))).days <= days:
+                    out.append(m[1].strip())
+                    break
+            except ValueError:
+                pass
+    return out
+
+
+def cards_from_plan(mem: Path, plan: dict, cands: dict, names: dict, now: datetime | None = None) -> list[str]:
+    """The model proposed the cards (merging one job across people); code checks and writes them. A card from more
+    than one person's list goes to admin/cards/, from one person's to their folder; never to shared/. The card's
+    lines are the old to-do lines themselves, not the model's words."""
+    now, out = now or datetime.now(), []
+    for p in (plan or {}).get("cards") or []:
+        refs = []
+        for r in dict.fromkeys(x for x in p.get("from") or [] if isinstance(x, str)):
+            n, _, k = r.partition("#")
+            if n in cands and k.isdigit() and 0 < int(k) <= len(cands[n]):
+                refs.append((n, cands[n][int(k) - 1]))
+        if not refs:
+            continue
+        who = list(dict.fromkeys(n for n, _ in refs))
+        home = mem / "admin" / "cards" if len(who) > 1 else mem / "people" / who[0] / "cards"
+        added, due = DATE.search(refs[0][1]), str(p.get("due") or "").strip()
+        c = card_open(mem, home, " ".join(str(p.get("title") or refs[0][1]).split())[:80],
+                      f"{names.get(who[0], '+' + who[0])} (+{who[0]})" + (f", {added[0]}" if added else ""),
+                      " ".join(str(p.get("for") or "").split())[:200],
+                      " ".join(str(p.get("next") or "check with them").split())[:300], "", people=who,
+                      due=due if DATE.fullmatch(due) else "", now=now,
+                      lines=[f"{now:%d/%m %H:%M} from {names.get(n, n)}'s old to-dos: {x[:240]}" for n, x in refs])
+        status = " ".join(str(p.get("status") or "").split())[:200]
+        if status.startswith("waiting:"):
+            c["Status"] = status
+            card_write(c)
+        out.append(f"- {c['Id']} {c['title']} → {home.relative_to(mem).as_posix()}/ ({len(refs)} old lines)")
+    return out
