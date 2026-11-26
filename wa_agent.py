@@ -39,7 +39,7 @@ def _nums(key):
 ADMINS = _nums("ADMIN_NUMBERS")
 ALLOWED = _nums("ALLOWED_NUMBERS") | ADMINS
 IDLE_MIN = float(os.environ.get("SESSION_IDLE_MIN", "60"))
-MODEL = "claude-fable-5-2"  # the chat agent's model (AGENT_MODEL in .env is ignored: a push sets it on every PC)
+MODEL = "claude-opus-5-5"  # the chat agent's model (AGENT_MODEL in .env is ignored: a push sets it on every PC)
 EFFORT = "medium"  # low | medium | high: thinking for the chat agent (AGENT_EFFORT in .env is ignored)
 KEEPER_MODEL, KEEPER_EFFORT = os.environ.get("KEEPER_MODEL") or "haiku", "low"  # memory keeper: quick save per reply
 CLOSE_MODEL, CLOSE_EFFORT = os.environ.get("CLOSE_MODEL") or "sonnet", "low"  # its cleanup when a chat closes
