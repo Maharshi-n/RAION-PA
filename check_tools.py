@@ -1551,6 +1551,37 @@ async def main():
             if not down:
                 await brunner.cleanup()
             wa.BULK_URL, wa.BULK_KEY_FILE, wa.TPL_WATCH, wa.handle_message = bulk
+
+        # the office PCs' files: an admins' tool; staff are refused; an admin's call reaches filewatch and finds a
+        # document by a word inside it (filewatch.py test checks the reading itself)
+        fw, kept = wa.filewatch, (wa.filewatch.HOME, wa.filewatch.CONFIG)
+        box = Path(tempfile.mkdtemp(prefix="pcfiles_"))
+        try:
+            fw.HOME, fw.CONFIG = box / "raion", box / "pcs.json"
+            (box / "pc" / "Fees").mkdir(parents=True)
+            (box / "pc" / "Fees" / "Book1.csv").write_text("Name,Tuition\nMeena Joshi,12000\n", encoding="utf-8")
+            assert wa.FILES_TOOL in wa.TOOLS and wa.FILES_TOOL["admin"]
+            s.admin = False
+            try:
+                await wa.run_tool(s, "pc_files", {"action": "pcs"})
+                raise AssertionError("staff reached the office PCs' files")
+            except PermissionError:
+                pass
+            s.admin = True
+            assert not wa.files_tick()  # no PC added: nothing runs
+            r, _ = await wa.run_tool(s, "pc_files", {"action": "add", "pc": "PC9", "folders": [str(box / "pc")]})
+            assert r["folders"][str(box / "pc")] == "opens", r
+            r, _ = await wa.run_tool(s, "pc_files", {"action": "scan"})
+            await soon(lambda: wa._files_task.done())
+            assert r["started"] and wa._files_task.done()
+            r, _ = await wa.run_tool(s, "pc_files", {"action": "find", "query": "meena tuition"})
+            assert r["found"][0]["path"].endswith("Book1.csv") and Path(r["found"][0]["copy"]).is_file(), r
+            r, _ = await wa.run_tool(s, "pc_files", {"action": "read", "path": r["found"][0]["copy"]})
+            assert "Meena Joshi" in r["text"]
+            assert "The office PCs' files" in s.briefing() and "first look" in fw.day_brief()
+        finally:
+            fw.HOME, fw.CONFIG = kept
+            shutil.rmtree(box, ignore_errors=True)
         print("ok")
     finally:
         p.stdin.close()

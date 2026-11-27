@@ -62,3 +62,29 @@ You set it up once, then the watchdog keeps it running and pulls Maharshi's code
 - Tally: admins' Raion reads it (never writes) through RaionGate on the accountant's PC. RaionGate\ is for that PC
   only: there, setup.bat (double-click, Yes) installs it and shows a code for Raion; remove.bat undoes it. Nothing of
   it runs on this PC. Raion keeps the code and the gate's address in .runtime\tally.json.
+
+## The office PCs' files (filewatch.py)
+Raion reads the operators' work folders over the LAN and keeps copies of the documents in pcfiles\ (never in git,
+never in memory\). Nothing is installed on the other PCs: their folders are only shared, read-only.
+
+On each operator PC, once (Command Prompt as administrator; replace the password, the Windows user name and the drive):
+1. A read-only account only Raion uses, hidden from the sign-in screen:
+   `net user raionread THE-PASSWORD /add /passwordchg:no /expires:never`
+   `reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList" /v raionread /t REG_DWORD /d 0 /f`
+2. Share the work folders, read-only, to that account only (a whole data drive is fine; never all of C:):
+   `net share Work=D:\ /grant:raionread,READ`
+   `net share Desktop="C:\Users\NAME\Desktop" /grant:raionread,READ` (the same for Documents and Downloads)
+   `icacls "C:\Users\NAME\Desktop" /grant raionread:(OI)(CI)RX` (folders inside C:\Users need this too)
+3. Let the PC be seen on the LAN: the network set to Private (Home/Work on Windows 7), and
+   `netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes`
+
+Then, in the admin's WhatsApp chat with Raion:
+1. "probe \192.168.1.50\Work with user raionread, password ...": Raion answers with the file counts and how long
+   one listing took. Past 20 seconds the reading goes easy on that PC by itself (see SLOW_SECS in filewatch.py).
+2. "add it as PC2 with these folders": from then on it is read every 15 minutes, 8:00-20:00. The first reading
+   copies every document, 10 minutes of copying per run until it is through.
+3. Raion's pc_files tool: find, read, changes, pcs. The account's password stays in .runtime\pcfiles.json.
+
+Check without Raion: `.venv\Scripts\python.exe -X utf8 filewatch.py probe \192.168.1.50\Work raionread THE-PASSWORD`,
+and `filewatch.py test` (ends with `ok`). pcfiles\ grows with the documents: put it on a drive with room by setting
+PC_FILES_DIR in .env before the first PC is added.
