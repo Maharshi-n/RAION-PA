@@ -34,7 +34,12 @@ SKIP_DIRS = {"windows", "program files", "program files (x86)", "programdata", "
              "temp", "tmp", "node_modules", "__pycache__", ".git", ".venv", "venv", ".cache"}
 SKIP_FILES = {"thumbs.db", "desktop.ini", "ntuser.dat", ".ds_store"}
 SKIP_ENDS = (".tmp", ".part", ".crdownload", ".lnk", ".lock", ".bak~")
-COPY_MAX = 100 * 2**20  # a bigger document is only listed (WhatsApp can't send it anyway)
+COPY_MAX = 20 * 2**20  # a bigger document is only listed (scanned books and syllabi: most of a PC's gigabytes)
+# What a PC already held on the day it was first read, untouched for longer than this: listed, its words read into
+# the index over the LAN, no copy kept (fetch gets one when asked). Everything newer, and everything that turns up
+# later, is copied and that copy is never dropped for growing old.
+RECENT_DAYS = 365
+FETCH_MAX, FETCH_DAYS = 100 * 2**20, 7  # one file fetched on request: up to WhatsApp's limit, kept a week
 COPY_SECS = 600  # copying per PC per run; the rest waits for the next run (the first run of a PC has a lot)
 TEXT_CHARS, TEXT_MAX, PDF_PAGES = 20000, 30 * 2**20, 10  # words kept per document; bigger files: name only
 COLLAPSE = 15  # more files than this in one place: one line with counts instead of their names
@@ -52,7 +57,9 @@ CREATE INDEX IF NOT EXISTS dirs_up ON dirs(pc, root, up);
 CREATE TABLE IF NOT EXISTS roots (pc TEXT, root TEXT, full REAL, secs REAL, seen REAL, PRIMARY KEY(pc, root));
 CREATE VIRTUAL TABLE IF NOT EXISTS words USING fts5(name, dir, body, tokenize="unicode61 categories 'L* N* Co Mn Mc'");
 """
-# files.copied: 0 = a document still to copy (new, changed, or open in Excel last time), 1 = in mirror/, 2 = too big
+# files.copied: 0 = a document still to copy (new, changed, or open in Excel last time), 1 = in mirror/, 2 = too big,
+# 3 = old when the PC was first read: its words are in the index, no copy
+# files.mtime: when the file was last saved, by its own PC (what find sorts and filters by)
 # files.changed / first / gone: Raion's PC's clock (the other PCs' clocks can be wrong); mtime only tells a change
 
 
@@ -190,13 +197,28 @@ def _mirror(pc, label, d, n="") -> str:
 
 
 def _keep(dest: str, now: float):
-    """The copy about to be replaced goes to versions/, once a day: how the document was that morning."""
+    """The copy about to be replaced goes to versions/, once a day (how the document was that morning), and it is the
+    only one kept: a spare for the day a file is saved wrong, not a history."""
     rel = os.path.relpath(dest, HOME / "mirror")
     stem, ext = os.path.splitext(rel)
     ver = _long(HOME / "versions" / f"{stem}.{datetime.fromtimestamp(now):%Y%m%d}{ext}")
     if not os.path.exists(ver):
         os.makedirs(os.path.dirname(ver), exist_ok=True)
         os.replace(_long(dest), ver)
+        for old in _versions(dest):
+            if _long(old) != ver:
+                os.remove(_long(old))
+
+
+def _versions(dest: str) -> list[str]:
+    """The kept earlier copies of one document (name.YYYYMMDD.ext)."""
+    stem, ext = os.path.splitext(os.path.relpath(dest, HOME / "mirror"))
+    folder, base = os.path.split(str(HOME / "versions" / stem))
+    try:
+        return [os.path.join(folder, f) for f in os.listdir(_long(folder))
+                if f.startswith(base + ".") and f.endswith(ext) and re.fullmatch(r"\.\d{8}", f[len(base):len(f) - len(ext)])]
+    except OSError:
+        return []
 
 
 def _copy(src: str, dest: str, size: int, m: float, now: float) -> bool:
@@ -298,6 +320,83 @@ def text_of(p, limit=TEXT_CHARS) -> str:
 
 
 # ---------------- one run ----------------
+def _born(con, pc: str) -> dict:
+    """{folder: when it was first read}: every file found that day carries the same time."""
+    return dict(con.execute("SELECT root, min(first) FROM files WHERE pc=? GROUP BY root", (pc,)))
+
+
+def _old(seen: float, m: float, born: float | None) -> bool:
+    """Was it there on the first day, and by then untouched for RECENT_DAYS? Judged against that day, not today: a
+    copied file never turns old."""
+    return born is not None and seen == born and m < born - RECENT_DAYS * 86400
+
+
+def trim(con) -> int:
+    """Copies that the rules no longer keep are removed (the limits were wider at first): documents over COPY_MAX,
+    and those old when their PC was first read. Their words stay in the index. Nothing else is ever deleted here."""
+    n = 0
+    for pc in {r[0] for r in con.execute("SELECT DISTINCT pc FROM files WHERE copied=1")}:
+        born = _born(con, pc)
+        for i, label, d, f, size, m, seen in con.execute(
+                "SELECT id, root, dir, name, size, mtime, first FROM files WHERE pc=? AND copied=1", (pc,)).fetchall():
+            state = 2 if size > COPY_MAX else 3 if _old(seen, m, born.get(label)) else 0
+            if state:
+                dest = _mirror(pc, label, d, f)
+                for p in (dest, *_versions(dest)):
+                    try:
+                        os.remove(_long(p))
+                    except OSError:
+                        pass
+                con.execute("UPDATE files SET copied=? WHERE id=?", (state, i))
+                n += 1
+    con.commit()
+    return n
+
+
+def fetch(path: str) -> str:
+    """One file straight from its PC, for a file with no copy here (old, big, a photo). -> where it now is."""
+    path = str(path).strip()
+    for pc in pcs():
+        for label, root in pc["roots"].items():
+            base = root.rstrip("\\/")
+            if path.lower().startswith(base.lower() + os.sep):
+                # only a file the index knows, rebuilt from its own folder and name: a path with ".." in it, or one
+                # made up, can neither read outside the shared folder nor write outside fetched/
+                parts = re.split(r"[\\/]", path[len(base) + 1:])
+                con = db()
+                try:
+                    row = None if any(p in ("", ".", "..") for p in parts) else con.execute(
+                        "SELECT dir, name FROM files WHERE pc=? AND root=? AND dir=? COLLATE NOCASE AND name=? COLLATE NOCASE "
+                        "AND gone IS NULL", (pc["name"], label, "/".join(parts[:-1]), parts[-1])).fetchone()
+                finally:
+                    con.close()
+                if not row:
+                    raise ValueError("path: a file's path on its PC, as find gives it (not deleted)")
+                if not _reach(pc, root):
+                    raise ConnectionError(f"{pc['name']} is off or its folder doesn't open right now: the file is at {path}")
+                src, dest = _at(root, *row), HOME / "fetched" / pc["name"] / label / _at("", *row)
+                if os.path.getsize(_long(src)) > FETCH_MAX:
+                    raise ValueError(f"over {FETCH_MAX // 2**20} MB: too big to send; it is at {path}")
+                os.makedirs(os.path.dirname(_long(dest)), exist_ok=True)
+                shutil.copyfile(_long(src), _long(dest) + ".part")
+                os.replace(_long(dest) + ".part", _long(dest))
+                return str(dest)
+    raise ValueError("path: a file's path on its PC, as find gives it")
+
+
+def _sweep(now: float):
+    """Fetched files are a week's convenience, not a record."""
+    for folder, _, files in os.walk(_long(HOME / "fetched")):
+        for f in files:
+            p = os.path.join(folder, f)
+            try:
+                if os.path.getmtime(p) < now - FETCH_DAYS * 86400:
+                    os.remove(p)
+            except OSError:
+                pass
+
+
+
 def _reach(pc: dict, path: str) -> bool:
     """Is the folder there right now? A PC that is off answers in 2 seconds, not Windows' half minute."""
     if path.startswith("\\\\") and not path.startswith("\\\\?\\"):
@@ -418,9 +517,10 @@ def run_pc(con, pc: dict, now: float | None = None, budget: float = COPY_SECS) -
 
     done = held = 0
     end = time.monotonic() + budget
-    todo = con.execute("SELECT id, root, dir, name, size, mtime FROM files WHERE pc=? AND kind='doc' AND gone IS NULL "
-                       "AND copied=0 ORDER BY changed DESC, id", (name,)).fetchall()
-    for n, (i, label, d, f, size, m) in enumerate(todo):
+    born = _born(con, name)
+    todo = con.execute("SELECT id, root, dir, name, size, mtime, first FROM files WHERE pc=? AND kind='doc' AND gone IS NULL "
+                       "AND copied=0 ORDER BY changed DESC, mtime DESC, id", (name,)).fetchall()  # the newest work first
+    for n, (i, label, d, f, size, m, seen) in enumerate(todo):
         if time.monotonic() > end:
             break
         if label not in evs:
@@ -428,8 +528,19 @@ def run_pc(con, pc: dict, now: float | None = None, budget: float = COPY_SECS) -
         if size > COPY_MAX:
             con.execute("UPDATE files SET copied=2 WHERE id=?", (i,))
             continue
+        src = _at(roots[label], d, f)
+        if _old(seen, m, born.get(label)) and not os.path.exists(_long(_mirror(name, label, d, f))):
+            try:  # old when the PC was first read: only its words, read over the LAN; no copy kept
+                with open(_long(src), "rb"):
+                    pass
+            except OSError:
+                held += 1
+                continue
+            con.execute("UPDATE files SET copied=3 WHERE id=?", (i,))
+            con.execute("UPDATE words SET body=? WHERE rowid=?", (text_of(src), i))
+            continue
         try:
-            ok = _copy(_at(roots[label], d, f), _mirror(name, label, d, f), size, m, now)
+            ok = _copy(src, _mirror(name, label, d, f), size, m, now)
         except OSError:
             ok = False
         if ok:
@@ -490,6 +601,8 @@ def write_pc(con, pc: dict, now: float):
 def run_all() -> list[dict]:
     out, con = [], db()
     try:
+        trim(con)
+        _sweep(time.time())
         for pc in pcs():
             try:
                 out.append(run_pc(con, pc))
@@ -507,32 +620,52 @@ def _full(roots: dict, label, d, n) -> str:
     return _at(roots.get(label, label), d, n)
 
 
-def find(q: str, pc=None, kind_=None, deleted=False, limit=10) -> list[dict]:
-    """Files by the words in their name, folder or (documents) inside them; best first. All the words, else any."""
+def _day(s, end=False) -> float | None:
+    if not s:
+        return None
+    try:
+        return datetime.strptime(str(s).strip()[:10], "%d/%m/%Y").timestamp() + (86400 if end else 0)
+    except ValueError:
+        raise ValueError("since / until: dd/mm/yyyy")
+
+
+def find(q: str, pc=None, kind_=None, deleted=False, limit=10, order="best", since=None, until=None,
+         now: float | None = None) -> list[dict]:
+    """Files by the words in their name, folder or (documents) inside them. All the words, else any.
+    order: best = the closest match, a file saved lately ahead of an equal one from years back (today counts double,
+    a year old 1.5, five years 1.2); newest / oldest = by the date the file was last saved. since / until narrow by
+    that date."""
     toks = mem.words(q)
     if not toks:
         return []
-    paths = {p["name"]: p["roots"] for p in pcs()}
-    sql = ("SELECT f.pc, f.root, f.dir, f.name, f.size, f.kind, f.changed, f.gone, f.copied, "
+    paths, now = {p["name"]: p["roots"] for p in pcs()}, now or time.time()
+    lo, hi = _day(since), _day(until, True)
+    by = {"newest": "f.mtime DESC", "oldest": "f.mtime ASC"}.get(
+        order, "bm25(words, 8.0, 3.0, 1.0) * (1.0 + 1.0 / (1.0 + max(0.0, ? - f.mtime) / 31536000.0))")
+    sql = ("SELECT f.pc, f.root, f.dir, f.name, f.size, f.kind, f.mtime, f.changed, f.gone, f.copied, "
            "snippet(words, 2, '[', ']', ' … ', 14) FROM words JOIN files f ON f.id = words.rowid WHERE words MATCH ? "
            + ("AND f.pc = ? " if pc else "") + ("AND f.kind = ? " if kind_ else "")
-           + ("" if deleted else "AND f.gone IS NULL ") + "ORDER BY bm25(words, 8.0, 3.0, 1.0) LIMIT ?")
+           + ("AND f.mtime >= ? " if lo else "") + ("AND f.mtime < ? " if hi else "")
+           + ("" if deleted else "AND f.gone IS NULL ") + f"ORDER BY {by} LIMIT ?")
     con = db()
     try:
         for glue in (" ", " OR "):
             rows = con.execute(sql, (glue.join(f'"{t}"*' for t in toks), *((pc,) if pc else ()),
-                                     *((kind_,) if kind_ else ()), max(1, min(int(limit or 10), 50)))).fetchall()
+                                     *((kind_,) if kind_ else ()), *((lo,) if lo else ()), *((hi,) if hi else ()),
+                                     *((now,) if "bm25" in by else ()), max(1, min(int(limit or 10), 50)))).fetchall()
             if rows:
                 break
     finally:
         con.close()
     day = lambda t: f"{datetime.fromtimestamp(t):%d/%m/%Y %H:%M}"
     return [{"pc": p, "path": _full(paths.get(p, {}), label, d, n), "kind": k, "size": _size(size),
-             "changed": day(ch), **({"deleted": day(gone)} if gone else {}),
+             "saved": day(m), **({"deleted": day(gone)} if gone else {}),
              **({"copy": _mirror(p, label, d, n)} if copied == 1 and os.path.exists(_long(_mirror(p, label, d, n)))
-                else {"copy": None, "why": "only listed, not copied" if k != "doc" else "not copied yet"}),
+                else {"copy": None, "why": {0: "not copied yet", 2: f"over {COPY_MAX // 2**20} MB", 3: "old"}.get(
+                    copied if k == "doc" else -1, "photos, videos and the rest are only listed")
+                    + ("" if gone else ": fetch gets it from the PC while that PC is on")}),
              **({"inside": snip} if snip.strip() else {})}
-            for p, label, d, n, size, k, ch, gone, copied, snip in rows]
+            for p, label, d, n, size, k, m, ch, gone, copied, snip in rows]
 
 
 def changes(pc=None, since: str | None = None, room=8000) -> str:
@@ -622,7 +755,9 @@ def tool(a: dict) -> dict:
     act, name = str(a.get("action") or ""), re.sub(r"[^\w -]", "", str(a.get("pc") or "")).strip()
     if act == "find":
         return {"found": find(str(a.get("query") or ""), name or None, a.get("kind"), bool(a.get("deleted")),
-                              a.get("limit") or 10)}
+                              a.get("limit") or 10, a.get("order") or "best", a.get("since"), a.get("until"))}
+    if act == "fetch":
+        return {"copy": fetch(str(a.get("path") or "")), "kept": f"{FETCH_DAYS} days"}
     if act == "changes":
         return {"changes": changes(name or None, a.get("since"))}
     if act == "pcs":
@@ -665,7 +800,7 @@ def tool(a: dict) -> dict:
         CONFIG.parent.mkdir(parents=True, exist_ok=True)
         CONFIG.write_text(json.dumps(all_, ensure_ascii=False, indent=1), encoding="utf-8")
         return {"saved": name, "folders": note}
-    raise ValueError("action: find, changes, pcs, read, probe, add, remove or scan")
+    raise ValueError("action: find, read, fetch, changes, pcs, probe, add, remove or scan")
 
 
 # ---------------- the self-check: a made-up messy PC ----------------
@@ -711,9 +846,27 @@ def _test():
         con = db()
         mirror = HOME / "mirror" / "PC2" / "D"
 
-        r = run_pc(con, pc, T)  # 1. the first look: documents copied, junk never seen, a program only listed
-        assert r["new"] == 5 and r["copied"] == 4 and "first look" in r["lines"][0], r
+        put("Scholarship/list 2026.txt", b"scholarship list of students"), put("Scholarship/list 2024.txt", b"scholarship list of students", age=700 * 86400)
+        r = run_pc(con, pc, T)  # 1. the first look: recent documents copied, junk never seen, a program only listed
+        assert r["new"] == 7 and r["copied"] == 4 and r["waiting"] == 0 and "first look" in r["lines"][0], r
         assert (mirror / "Desktop/New folder/Book1.xlsx").exists() and not (mirror / "setup.exe").exists()
+        # untouched for over a year on that day: no copy, but found by its words, and fetched from the PC when asked
+        old = find("aman marks")[0]
+        assert old["copy"] is None and "old: fetch" in old["why"] and not list(mirror.rglob("result.csv")), old
+        assert Path(fetch(old["path"])).read_bytes().startswith(b"name,marks") and Path(fetch(str(D / "setup.exe"))).exists()
+        (tmp / "pc" / "secret.txt").write_text("outside the shared folder")
+        for bad in (str(D / ".." / "secret.txt"), str(D / "Accounts" / ".." / ".." / "secret.txt"), str(D / "never seen.txt")):
+            try:  # fetch takes only files the index knows: no way out of the shared folder, or of fetched/
+                fetch(bad)
+                raise AssertionError(f"fetched {bad}")
+            except ValueError:
+                pass
+        assert not list(HOME.rglob("secret.txt"))
+        # the same words in a new file and an old one: the new one first, unless asked for the oldest; dates narrow
+        got = lambda **k: [Path(x["path"]).name for x in find("scholarship list", now=T, **k)]
+        assert got() == ["list 2026.txt", "list 2024.txt"] and got(order="oldest")[0] == "list 2024.txt", got()
+        assert got(since=f"{datetime.fromtimestamp(T - 30 * 86400):%d/%m/%Y}") == ["list 2026.txt"]
+        assert got(until=f"{datetime.fromtimestamp(T - 30 * 86400):%d/%m/%Y}") == ["list 2024.txt"]
         assert not list(mirror.rglob("cache.txt")) and not list(mirror.rglob("~$*"))
         assert find("tuition dues")[0]["path"].endswith("Book1.xlsx"), find("tuition dues")  # by what's inside
         assert find("rahul 2601")[0]["copy"] and find("priya certificate")[0]["path"].endswith("letter.docx")
@@ -786,17 +939,23 @@ def _test():
         put("Old/2019/deep/late.txt", b"deep", age=-7000)  # deep in a quiet folder: Old/'s own date doesn't change
         os.utime(D / "Old", (T - 400 * 86400,) * 2), os.utime(D / "Old/2019", (T - 400 * 86400,) * 2)
         con.execute("UPDATE dirs SET mtime=? WHERE dir IN ('Old', 'Old/2019')", (T - 400 * 86400,))
-        put("Accounts/new_today.txt", b"today", age=-7000), put("Brand new/first.txt", b"hello", age=-7000)
+        put("Accounts/new_today.txt", b"today", age=500 * 86400), put("Brand new/first.txt", b"hello", age=-7000)
         r = run_pc(con, pc, T8 + 60)
         assert r["new"] == 2 and not find("late"), r
+        assert find("today")[0]["copy"]  # an old date, but it turned up after the first day: someone's work now, copied
         r = run_pc(con, pc, T8 + (FULL_HOURS + 1) * 3600)
         assert r["new"] == 1 and find("late")[0]["copy"], r
+
+        put("Accounts/letter.docx", docx("Fifth wording"), age=-90000)  # 9. another day: still one earlier copy, the newer
+        run_pc(con, pc, T + 2 * 86400)
+        ver = list((HOME / "versions" / "PC2" / "D" / "Accounts").glob("letter.*.docx"))
+        assert len(ver) == 1 and "Fourth" in text_of(ver[0]) and "Fifth" in text_of(mirror / "Accounts/letter.docx"), ver
 
         assert "PC2 · " in changes(since=f"{datetime.fromtimestamp(T):%d/%m/%Y}") and "Fees 2026" in (HOME / "pcs/PC2.md").read_text("utf-8")
         brief = day_brief(T8 + 60)
         assert "new_today.txt" in brief and "first.txt: hello" in brief and day_brief(T - 5 * 86400) is None, brief
         assert tool({"action": "pcs"})["pcs"][0]["documents"] >= 5
-        assert "Fourth" in tool({"action": "read", "path": str(mirror / "Accounts/letter.docx")})["text"]
+        assert "Fifth" in tool({"action": "read", "path": str(mirror / "Accounts/letter.docx")})["text"]
         try:
             tool({"action": "read", "path": str(CONFIG)})
             raise AssertionError("read outside the copies")
@@ -804,6 +963,20 @@ def _test():
             pass
         assert tool({"action": "add", "pc": "PC3", "folders": [str(D)]})["folders"][str(D)] == "opens" and len(pcs()) == 2
         assert probe(str(D))["by_kind"]["photo"] == 1000
+
+        # 10. the limits were wider once: copies over the size limit, and of files old on the first day, are removed
+        # (their earlier copy too); the words stay, so they are still found
+        con.execute("UPDATE files SET copied=1 WHERE name='list 2024.txt'")
+        (mirror / "Scholarship/list 2024.txt").write_bytes(b"scholarship list of students")
+        globals()["COPY_MAX"] = 50  # bytes: letter.docx is over it, the small text files are not
+        try:
+            assert trim(con) >= 2 and not (mirror / "Scholarship/list 2024.txt").exists()
+            assert not (mirror / "Accounts/letter.docx").exists() and not list(ver[0].parent.glob("letter.*.docx"))
+            assert (mirror / "Scholarship/list 2026.txt").exists() and trim(con) == 0
+            hit = find("fifth wording")[0]
+            assert hit["copy"] is None and "over 0 MB" in hit["why"] and "old" in find("scholarship", order="oldest")[0]["why"]
+        finally:
+            globals()["COPY_MAX"] = 20 * 2**20
         con.close()
         print("ok")
     finally:

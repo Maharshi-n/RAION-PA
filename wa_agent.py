@@ -43,7 +43,7 @@ ALLOWED = _nums("ALLOWED_NUMBERS") | ADMINS
 SUPERADMINS = (_nums("SUPERADMIN_NUMBERS") or {"919713600511"}) & ADMINS
 IDLE_MIN = float(os.environ.get("SESSION_IDLE_MIN", "60"))
 MODEL = "claude-opus-5-5"  # the chat agent's model (AGENT_MODEL in .env is ignored: a push sets it on every PC)
-EFFORT = "high"  # low | medium | high: thinking for the chat agent (AGENT_EFFORT in .env is ignored)
+EFFORT = "medium"  # low | medium | high: thinking for the chat agent (AGENT_EFFORT in .env is ignored)
 KEEPER_MODEL, KEEPER_EFFORT = os.environ.get("KEEPER_MODEL") or "haiku", "low"  # memory keeper: quick save per reply
 CLOSE_MODEL, CLOSE_EFFORT = os.environ.get("CLOSE_MODEL") or "sonnet", "low"  # its cleanup when a chat closes
 MEMORY_LIMIT = {True: 4000, False: 2500}  # MEMORY.md of an admin / a staff member (kept under it)
@@ -1937,16 +1937,21 @@ if FACT_TOOL:
     TOOLS.append(FACT_TOOL_DEF)
 FILES_TOOL = _tool(
     "pc_files", "The other office PCs' work folders (admins; rules: 'The office PCs' files'). find: files by words in "
-    "their name, folder or inside a document; each comes with its PC, path, date and copy (the path here to send or "
-    "read; none for photos and videos). read: the words of an Excel/Word/PDF copy. changes: what changed (today, or "
-    "since). pcs: the PCs and when each was last seen. probe: count and time a shared folder. add / remove a PC. "
-    "scan: read them all now.",
-    {"action": {"enum": ["find", "read", "changes", "pcs", "probe", "add", "remove", "scan"]},
+    "their name, folder or inside a document; each comes with its PC, path, the date it was last saved, and copy (the "
+    "path here to send or read; none for old or big documents, photos and videos). fetch: get one such file from its "
+    "PC now (that PC must be on). read: the words of an Excel/Word/PDF copy. changes: what changed (today, or since). "
+    "pcs: the PCs and when each was last seen. probe: count and time a shared folder. add / remove a PC. scan: read "
+    "them all now.",
+    {"action": {"enum": ["find", "fetch", "read", "changes", "pcs", "probe", "add", "remove", "scan"]},
      "query": {**S, "description": "find: a few key words"}, "pc": {**S, "description": "the PC's name"},
      "kind": {"enum": ["doc", "photo", "video", "other"], "description": "find: only this kind"},
+     "order": {"enum": ["best", "newest", "oldest"], "description": "find: best (default) = closest match, lately "
+               "saved files ahead; newest / oldest = by the date last saved"},
      "deleted": {**B, "description": "find: also files deleted on the PC (their copy is kept)"},
-     "limit": {**N, "default": 10}, "path": {**S, "description": "read: a copy path from find"},
-     "since": {**S, "description": "changes: dd/mm/yyyy"},
+     "limit": {**N, "default": 10},
+     "path": {**S, "description": "read: a copy path from find. fetch: a file's path on its PC, from find"},
+     "since": {**S, "description": "find: saved on or after, changes: from; dd/mm/yyyy"},
+     "until": {**S, "description": "find: saved on or before, dd/mm/yyyy"},
      "folder": {**S, "description": "probe: a shared folder, like \\\\192.168.1.50\\D"},
      "folders": {"type": "array", "items": S, "description": "add: the shared folders to read"},
      "user": {**S, "description": "add: the read-only account on that PC"}, "password": S}, ["action"], admin=True)
@@ -6258,12 +6263,21 @@ async def limit_wake():
 FILES_PROMPT = """
 # The office PCs' files (pc_files tool, admins only)
 The operators' work folders on the other office PCs are read over the LAN every few minutes in office hours. Every
-file is in an index; documents (Excel, Word, PowerPoint, PDF, text) are also copied to this computer; photos, videos
-and everything else are only listed.
+file is in an index, documents with the words inside them. Recent documents (Excel, Word, PowerPoint, PDF, text) are
+also copied to this computer and kept; documents already old when a PC was first read, big ones, photos, videos and
+everything else are only listed.
 - They want a file from an office PC ("fees ki nayi list bhejo"): pc_files find with a few key words (names, folders
   and the words inside documents; nothing found: other words, or the Hindi/English word). Several look alike (final,
-  final2, a copy): take the one changed last and say which it is, or ask. Send its copy path with send_message.
-  A photo or video has no copy: tell them the PC and folder it is in.
+  final2, a copy): take the one saved last and say which it is, or ask. Send its copy path with send_message.
+- Which order, from what they ask:
+  - the current or latest one ("nayi list", "abhi wali", "latest"): order newest.
+  - something of an earlier time ("pichhle saal kitne bachchon ko scholarship mili", "2024 ka result"): put the
+    year or session in the words and leave the dates open, because an old matter's file may have been corrected
+    last week: look at both the ones saved back then and the ones saved lately, and say which you used. Narrow with
+    since / until only when too many come back.
+  - no time meant: leave order alone (best).
+- A file with no copy (its "why" says so): pc_files fetch with its path gets it from the PC, then send that. The PC
+  is off: tell them the PC and folder it is in, and that it can go once that PC is on.
 - What an Excel, Word or PDF copy says: pc_files read. Before you state a number or a name from a file, read the
   file; the "inside" line of find is only for finding it.
 - "Kya naya hai", "aaj kya badla": pc_files changes. A big batch is one line on purpose: leave photos, videos,

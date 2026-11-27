@@ -79,12 +79,14 @@ On each operator PC, once (Command Prompt as administrator; replace the password
    `netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes`
 
 Then, in the admin's WhatsApp chat with Raion:
-1. "probe \192.168.1.50\Work with user raionread, password ...": Raion answers with the file counts and how long
+1. "probe \\192.168.1.50\Work with user raionread, password ...": Raion answers with the file counts and how long
    one listing took. Past 20 seconds the reading goes easy on that PC by itself (see SLOW_SECS in filewatch.py).
 2. "add it as PC2 with these folders": from then on it is read every 15 minutes, 8:00-20:00. The first reading
    copies every document, 10 minutes of copying per run until it is through.
 3. Raion's pc_files tool: find, read, changes, pcs. The account's password stays in .runtime\pcfiles.json.
 
-Check without Raion: `.venv\Scripts\python.exe -X utf8 filewatch.py probe \192.168.1.50\Work raionread THE-PASSWORD`,
-and `filewatch.py test` (ends with `ok`). pcfiles\ grows with the documents: put it on a drive with room by setting
+Check without Raion: `.venv\Scripts\python.exe -X utf8 filewatch.py probe \\192.168.1.50\Work raionread THE-PASSWORD`,
+and `filewatch.py test` (ends with `ok`). Kept as copies: documents up to 20 MB saved in the year before a PC was
+first read, and everything after (plus one earlier copy of a file that changes). Older and bigger ones are only
+listed, and fetched from their PC when asked (COPY_MAX, RECENT_DAYS in filewatch.py). pcfiles\ grows with the documents: put it on a drive with room by setting
 PC_FILES_DIR in .env before the first PC is added.
