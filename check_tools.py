@@ -21,6 +21,20 @@ wa.SELF_TEST_LOG = wa.REJECTS.parent / "selftest.jsonl"
 assert os.environ.get("WA_TOKEN") and not {"WA_TOKEN", "ADMIN_NUMBERS"} & (set(wa.ENV) | set(wa.ENV_THINKING))
 
 
+async def soon(ok, secs=10):
+    """Background work given time to land: until ok() holds, at most secs (the assert after it says what is wrong).
+    A fixed short sleep lost that race on the office PC: slower, and its real memory makes each search-index update
+    take longer than the 50 ms the check used to wait."""
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        try:
+            if ok():
+                return
+        except (IndexError, KeyError):  # nothing there yet
+            pass
+        await asyncio.sleep(0.02)
+
+
 async def main():
     maint = wa.in_maintenance
     wa.in_maintenance = lambda t=None: maint(t) if t else False  # a check run at 1 AM still checks the daytime paths
@@ -567,7 +581,7 @@ async def main():
             wa._jwrite(NUM, "window.json", {"last_in": time.time()})
             # its question goes to the admin through Raion's locked-down relay, and stays open until answered
             await call("ask_admin", text="Vipin sir bus list maang rahe hain. Du?")
-            await asyncio.sleep(0.05)
+            await soon(lambda: relayed[-1][0] == NUM and "Vipin sir bus list maang rahe hain" in relayed[-1][1])
             assert relayed[-1][0] == NUM and "Vipin sir bus list maang rahe hain" in relayed[-1][1]
             assert "waiting for their answer: Vipin sir bus list" in wa.errands_text(NUM)
             # after asking the admin (a no, a threat): that run may still tell them, a later one can't write at all
@@ -594,7 +608,7 @@ async def main():
             await wa.send_text(NUM, "Bus list de dun?")
             await wa.handle_incoming({"from": NUM, "id": "q1", "type": "text", "text": {"body": "haan de do"},
                                       "context": {"id": "dry"}})
-            await asyncio.sleep(0.1)
+            await soon(lambda: passed[-1] == (NUM, '[Replying to your message: "Bus list de dun?"] haan de do'))
             assert passed[-1] == (NUM, '[Replying to your message: "Bus list de dun?"] haan de do')
             s.said = "haan de do"  # what the real handle_message records for their reply
             assert (await wa.errand_tool(s, {"action": "tell", "id": eid, "number": E1, "text": "haan de do"}))[
@@ -636,7 +650,7 @@ async def main():
                                  "raw": wa.ERRAND_RAW.pop((e2, E3))}
         async with wa.aiohttp.ClientSession(await wa.tool_api(), headers={"X-Raion-Key": "ek2"}) as c:
             r = await (await c.post("/call", json={"name": "pass_on", "arguments": {}})).json()
-        await asyncio.sleep(0.1)
+        await soon(lambda: passed[-1] == (E3, "mera leave letter"))
         assert '"passed": 1' in said(r) and passed[-1] == (E3, "mera leave letter")
         n = len(wa.SENT)
         assert (await wa.errand_tool(s, {"action": "cancel", "id": e2}))["cancelled"] == e2
@@ -656,7 +670,7 @@ async def main():
         e["deadline"] = "2020-01-01T10:00"
         wa._ewrite(e)
         wa.check_errands()
-        await asyncio.sleep(0.05)
+        await soon(lambda: finals[-1] == (e3, "the deadline passed"))
         assert finals[-1] == (e3, "the deadline passed")
         # the relay itself: its answer reaches the admin as a message; if it fails, the plain fallback goes instead
         class Says(Quiet):
@@ -702,7 +716,8 @@ async def main():
                                                                                           "number": E2, "text": "x"})
         wa.ADMINS.add(NUM)  # an admin's message wakes their Raion, which can then only tell them
         rid = (await wa.relay_tool(s, {"action": "send", "number": E3, "text": "kal 10 baje meeting", "reply": True}))["id"]
-        await asyncio.sleep(0.05)
+        await soon(lambda: "no message from" in r3.brain.got[-1] and "kal 10 baje meeting" in r3.brain.got[-1]
+                   and r3.relay_turn)
         assert "no message from" in r3.brain.got[-1] and "kal 10 baje meeting" in r3.brain.got[-1] and r3.relay_turn
         assert "own words" in await relay_refused(r3, {"action": "send", "number": NUM, "text": "x"})
         assert "own words" in await relay_refused(r3, {"action": "done", "id": rid, "text": "haan"})
@@ -720,7 +735,7 @@ async def main():
         assert "kal 10 baje" in wa.inbox_text(E3)  # a refused answer leaves it open
         # a staff member's answer reaches the admin word for word: no model in between, nothing woken
         await wa.relay_tool(r3, {"action": "done", "id": rid, "text": "haan, aa jaunga"})
-        await asyncio.sleep(0.05)
+        await soon(lambda: wa.inbox_text(E3) == "" and "haan, aa jaunga" in wa.SENT[-1]["text"])
         assert wa.inbox_text(E3) == "" and s.brain.got == [] and wa.SENT[-1]["to"] == NUM
         assert wa.SENT[-1]["text"].startswith("📨 *") and "haan, aa jaunga" in wa.SENT[-1]["text"]
         assert "kal 10 baje" in wa.SENT[-1]["text"] and "word for word" in wa.inbox_text(NUM)
@@ -729,10 +744,10 @@ async def main():
         await wa.relay_tool(s, {"action": "send", "number": E3, "text": "fees list bhejna", "now": False})
         wa._jwrite(E3, "window.json", {"last_in": 0})
         await wa.relay_tool(s, {"action": "send", "number": E3, "text": "urgent baat"})
-        await asyncio.sleep(0.05)
+        await soon(lambda: wa.SENT[-1]["type"] == "template")
         assert len(r3.brain.got) == n and wa.SENT[-1]["type"] == "template"  # nothing woken: the doorbell rang
         await wa.handle_incoming({"from": E3, "id": "rb1", "type": "button", "button": {"text": "Dekhiye"}})
-        await asyncio.sleep(0.05)
+        await soon(lambda: "fees list bhejna" in r3.brain.got[-1] and "urgent baat" in r3.brain.got[-1])
         assert "fees list bhejna" in r3.brain.got[-1] and "urgent baat" in r3.brain.got[-1]
         assert "waiting for them" in str((await wa.relay_tool(s, {"action": "list"}))["sent"])
         wa.ADMINS.discard(NUM)
@@ -1072,7 +1087,7 @@ async def main():
         said("ek baat aur, kal school band rahega")
         wa.keeper_soon(k)
         assert k.keeper_timer and len(asked) == n
-        await asyncio.sleep(0.3)
+        await soon(lambda: len(asked) == n + 1 and k.keeper_from == 12 and not k.keeper_timer)
         assert len(asked) == n + 1 and k.keeper_from == 12 and not k.keeper_timer
         assert "ok thanks" in asked[-1][0].split("=== New ===")[-1]
         for i in range(wa.KEEPER_BATCH - 1):  # Raion's replies don't count towards the batch, their messages do
@@ -1082,7 +1097,7 @@ async def main():
         assert k.keeper_timer and len(asked) == n + 1
         said("message 9")
         wa.keeper_soon(k)
-        await asyncio.sleep(0.05)
+        await soon(lambda: len(asked) == n + 2 and k.keeper_from == 12 + 2 * wa.KEEPER_BATCH - 1 and not k.keeper_timer)
         assert len(asked) == n + 2 and k.keeper_from == 12 + 2 * wa.KEEPER_BATCH - 1 and not k.keeper_timer
         wa.KEEPER_QUIET = quiet
         # Raion's own saves are shown so they aren't proposed again; cards, topics and doubts from Raion's words too
@@ -1257,7 +1272,7 @@ async def main():
         wa.in_maintenance = lambda t=None: maint(t) if t else False
         wa.busy_mark()
         await wa.release_held()
-        await asyncio.sleep(0.05)
+        await soon(lambda: got == [("e9", "photo bhejta hoon")] and not wa.HELD.exists())
         assert got == [("e9", "photo bhejta hoon")] and not wa.HELD.exists()
         wa.errand_of, wa.errand_in = errand_of, errand_in
         # stage 6: chats stay on at night (no refusal); memory/ is a local git repository committed before and after
@@ -1271,7 +1286,7 @@ async def main():
             took.append(text)
         wa.handle_message = fake_hm
         await wa.handle_incoming({"from": NUM, "id": "m3", "type": "text", "text": {"body": "raat ko bhi kaam"}})
-        await asyncio.sleep(0.05)
+        await soon(lambda: took == ["raat ko bhi kaam"])
         assert took == ["raat ko bhi kaam"] and len(wa.SENT) == n  # taken in, nobody told about maintenance
         wa.handle_message = hm
         wa.in_maintenance = lambda t=None: maint(t) if t else False
