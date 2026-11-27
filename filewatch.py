@@ -758,6 +758,32 @@ def tool(a: dict) -> dict:
                               a.get("limit") or 10, a.get("order") or "best", a.get("since"), a.get("until"))}
     if act == "fetch":
         return {"copy": fetch(str(a.get("path") or "")), "kept": f"{FETCH_DAYS} days"}
+    if act == "rename":  # only the label: the index, the copies and the reports go with it, nothing is read again
+        new, all_ = re.sub(r"[^\w -]", "", str(a.get("to") or "")).strip(), pcs()
+        pc = next((p for p in all_ if p["name"] == name), None)
+        if not pc or not new or any(p["name"].lower() == new.lower() for p in all_ if p is not pc):
+            raise ValueError("rename: pc = a PC's name now, to = its new name (letters, digits, spaces; not one in use)")
+        moved = []
+        try:
+            for sub in ("mirror", "versions", "changes", "fetched"):
+                if (HOME / sub / name).is_dir():
+                    os.rename(HOME / sub / name, HOME / sub / new)
+                    moved.append(sub)
+        except OSError as e:  # a file of it is open somewhere: put back what moved, change nothing
+            for sub in moved:
+                os.rename(HOME / sub / new, HOME / sub / name)
+            raise ValueError(f"couldn't rename now ({e.strerror}); try again in a few minutes")
+        con = db()
+        try:
+            for t in ("files", "dirs", "roots"):
+                con.execute(f"UPDATE {t} SET pc=? WHERE pc=?", (new, name))
+            con.commit()
+        finally:
+            con.close()
+        (HOME / "pcs" / f"{name}.md").unlink(missing_ok=True)  # written again under the new name at the next run
+        pc["name"] = new
+        CONFIG.write_text(json.dumps(all_, ensure_ascii=False, indent=1), encoding="utf-8")
+        return {"renamed": name, "to": new}
     if act == "changes":
         return {"changes": changes(name or None, a.get("since"))}
     if act == "pcs":
@@ -800,7 +826,7 @@ def tool(a: dict) -> dict:
         CONFIG.parent.mkdir(parents=True, exist_ok=True)
         CONFIG.write_text(json.dumps(all_, ensure_ascii=False, indent=1), encoding="utf-8")
         return {"saved": name, "folders": note}
-    raise ValueError("action: find, read, fetch, changes, pcs, probe, add, remove or scan")
+    raise ValueError("action: find, read, fetch, changes, pcs, probe, add, rename, remove or scan")
 
 
 # ---------------- the self-check: a made-up messy PC ----------------
@@ -977,6 +1003,23 @@ def _test():
             assert hit["copy"] is None and "over 0 MB" in hit["why"] and "old" in find("scholarship", order="oldest")[0]["why"]
         finally:
             globals()["COPY_MAX"] = 20 * 2**20
+
+        # 11. a PC renamed: the same index, copies and reports under the new name; nothing read or copied again
+        n0 = con.execute("SELECT count(*) FROM files").fetchone()[0]
+        con.commit()
+        assert tool({"action": "rename", "pc": "PC2", "to": "Office 1"}) == {"renamed": "PC2", "to": "Office 1"}
+        hit = find("scholarship list", order="newest")[0]
+        assert hit["pc"] == "Office 1" and os.sep + "Office 1" + os.sep in hit["copy"] and Path(hit["copy"]).is_file(), hit
+        assert con.execute("SELECT count(*) FROM files WHERE pc='Office 1'").fetchone()[0] == n0 - 0 and not (HOME / "mirror/PC2").exists()
+        assert [p["name"] for p in pcs()] == ["Office 1", "PC3"] and (HOME / "changes" / "Office 1").is_dir()
+        r = run_pc(con, pcs()[0], T + 3 * 86400)
+        assert r["new"] == r["changed"] == r["gone"] == r["copied"] == 0, r
+        for bad in ({"pc": "Office 1", "to": "PC3"}, {"pc": "nobody", "to": "X"}, {"pc": "Office 1", "to": "../x"[:0]}):
+            try:
+                tool({"action": "rename", **bad})
+                raise AssertionError(bad)
+            except ValueError:
+                pass
         con.close()
         print("ok")
     finally:

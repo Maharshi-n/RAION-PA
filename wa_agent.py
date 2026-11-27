@@ -1940,9 +1940,10 @@ FILES_TOOL = _tool(
     "their name, folder or inside a document; each comes with its PC, path, the date it was last saved, and copy (the "
     "path here to send or read; none for old or big documents, photos and videos). fetch: get one such file from its "
     "PC now (that PC must be on). read: the words of an Excel/Word/PDF copy. changes: what changed (today, or since). "
-    "pcs: the PCs and when each was last seen. probe: count and time a shared folder. add / remove a PC. scan: read "
-    "them all now.",
-    {"action": {"enum": ["find", "fetch", "read", "changes", "pcs", "probe", "add", "remove", "scan"]},
+    "pcs: the PCs and when each was last seen. probe: count and time a shared folder. add / remove a PC. rename: "
+    "pc and to (only the name changes; never remove and add for that). scan: read them all now.",
+    {"action": {"enum": ["find", "fetch", "read", "changes", "pcs", "probe", "add", "rename", "remove", "scan"]},
+     "to": {**S, "description": "rename: the PC's new name"},
      "query": {**S, "description": "find: a few key words"}, "pc": {**S, "description": "the PC's name"},
      "kind": {"enum": ["doc", "photo", "video", "other"], "description": "find: only this kind"},
      "order": {"enum": ["best", "newest", "oldest"], "description": "find: best (default) = closest match, lately "
@@ -2606,6 +2607,8 @@ async def run_tool(s: Session, op: str, a: dict) -> tuple[dict, list]:
             raise PermissionError("the office PCs' files are only for admins")
         if a.get("action") == "scan":  # a first read of a PC takes minutes: it goes on by itself
             return {"started": files_tick(force=True), "note": "pc_files changes shows it in a few minutes"}, []
+        if a.get("action") == "rename" and _files_task and not _files_task.done():
+            raise ValueError("the PCs are being read right now: rename it in a few minutes (pc_files pcs shows when)")
         return await asyncio.to_thread(filewatch.tool, a), []
     if op == "wait_for_limit":
         low, note = limit_low(), str(a.get("note") or "").strip()
