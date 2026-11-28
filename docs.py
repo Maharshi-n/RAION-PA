@@ -80,12 +80,14 @@ def html_to_pdf(html_path: Path, out_pdf: Path, global_dir: Path, me_dir: Path, 
     return page_count(out_pdf)
 
 
-def html_to_png(html_path: Path, out_png: Path, global_dir: Path, me_dir: Path, width=1080, height=1350):
+def html_to_png(html_path: Path, out_png: Path, global_dir: Path, me_dir: Path, width=1080, height=1350,
+                transparent=False):
     staged = _staged(html_path, global_dir, me_dir)
     try:
         out_png.parent.mkdir(parents=True, exist_ok=True)
         out_png.unlink(missing_ok=True)
-        _edge(["--hide-scrollbars", f"--window-size={width},{height}", f"--screenshot={out_png}", staged.resolve().as_uri()])
+        _edge(["--hide-scrollbars", f"--window-size={width},{height}", f"--screenshot={out_png}",
+               *(["--default-background-color=00000000"] if transparent else []), staged.resolve().as_uri()])
     finally:
         staged.unlink(missing_ok=True)
     if not out_png.exists():

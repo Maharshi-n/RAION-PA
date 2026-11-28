@@ -748,8 +748,8 @@ message anyone; you check their results before anything reaches the person.
   page-break-after), generated from the data list by a script, then one make_pdf: one file they can print.
 - The office's own Word/Excel formats (sheets, lists, forms): fill the real file with fill_xlsx / fill_docx so it
   looks exactly like theirs. Read its .txt copy first to see the sheets, cells and wording.
-- Videos (reels, event videos, cutting and joining clips, adding music): follow global/VIDEO.md; its helper runs
-  as "__PY__" "__GLOBAL__/tools/video.py" <command>.
+- Videos (photos and clips into a finished reel or event video; cutting, joining, music): follow global/VIDEO.md;
+  its helper runs as "__PY__" "__GLOBAL__/tools/video.py" <command>.
 - Every build tool returns preview images: look at them before sending (layout, overflow, cut text, Hindi, page
   count, leftover placeholders); fix and rebuild if anything is off. A build with placeholders left can't be sent.
 - Corrections: edit the same work file and rebuild with the same name. Going back: restore the source from
@@ -1719,7 +1719,9 @@ TOOLS = [
           "images of the first pages for you to check. Sends nothing.", {"html": P, "name": S}, ["html", "name"]),
     _tool("make_image", "Render an HTML file in your folder to outbox/<name>.png (posters, WhatsApp cards). Returns the "
           "image for you to check. Sends nothing.",
-          {"html": P, "name": S, "width": {**N, "default": 1080}, "height": {**N, "default": 1350}}, ["html", "name"]),
+          {"html": P, "name": S, "width": {**N, "default": 1080}, "height": {**N, "default": 1350},
+           "transparent": {**B, "description": "no page background: text or a logo to lay over a video (VIDEO.md)"}},
+          ["html", "name"]),
     _tool("make_office", "Build outbox/<name>.pptx|docx|xlsx from a JSON spec (see 'make_office specs'). Returns preview "
           "images. Sends nothing.", {"kind": {"enum": ["pptx", "docx", "xlsx"]}, "name": S,
                                      "spec": {"description": "path to a JSON spec file, or the spec itself"}},
@@ -2645,7 +2647,8 @@ async def run_tool(s: Session, op: str, a: dict) -> tuple[dict, list]:
             shots = await _shots(s, out, res)
         else:
             out = s.p / "outbox" / f"{name}.png"
-            await docs.run(docs.html_to_png, html, out, GLOBAL, s.p, int(a.get("width", 1080)), int(a.get("height", 1350)))
+            await docs.run(docs.html_to_png, html, out, GLOBAL, s.p, int(a.get("width", 1080)), int(a.get("height", 1350)),
+                           bool(a.get("transparent")))
             res, shots = {"file": rel(out)}, [out]
         res["version"] = keep_version(s, name, out, html)
         for f in (out, *shots):
@@ -5428,6 +5431,10 @@ def init_memory():
     if not (SHARED / "QUESTIONS.md").exists():
         (SHARED / "QUESTIONS.md").write_text("# Doubts and corrections\n\n## Open\n\n## To confirm\n\n## Done\n",
                                              encoding="utf-8")
+    for src, dst in ((ROOT / "video.py", GLOBAL / "tools" / "video.py"), (ROOT / "VIDEO.md", GLOBAL / "VIDEO.md")):
+        if src.exists() and not (dst.exists() and dst.read_bytes() == src.read_bytes()):  # they come with the code (git)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
     write_global_index()
 
 
